@@ -86,7 +86,7 @@ wanderlust uninstall
        │                        │                        │
        ▼                        ▼                        ▼
  1. Registry Scan         4. Normalize Paths       7. Backup .reg
-    (HKCU Uninstall)         (Lowercase/Trim)         (%LOCALAPPDATA%)
+    (HKCU + HKLM)            (Lowercase/Trim)         (%LOCALAPPDATA%)
  2. Common Locations      5. Deduplicate           8. Write HKCU PATH
     (.cargo, .local)         (Preserve Order)      9. Broadcast Change
  3. Existing PATH         6. Prioritize System        (WM_SETTINGCHANGE)

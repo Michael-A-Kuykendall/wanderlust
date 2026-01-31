@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use walkdir::WalkDir;
-use windows_registry::CURRENT_USER;
+use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
 use log::debug;
 
 /// Represents a potential location for a specific command.
@@ -54,26 +54,31 @@ pub fn discover_candidates() -> HashMap<String, Vec<Candidate>> {
 
 /// Scans the Windows Registry for installed applications.
 ///
-/// Looks at `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall` for `InstallLocation` keys.
+/// Looks at `HKCU` and `HKLM` `Software\Microsoft\Windows\CurrentVersion\Uninstall` for `InstallLocation` keys.
 /// If a `bin` directory exists inside the install location, that is preferred.
 fn scan_registry_uninstall(map: &mut HashMap<String, Vec<Candidate>>) {
-    // Basic implementation: look at HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall
-    // A robust version would also check HKLM and 32-bit keys.
-    let hive = CURRENT_USER;
     let key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
     
-    if let Ok(uninstall_key) = hive.open(key_path) {
-        for subkey_name in uninstall_key.keys().into_iter().flatten() {
-            if let Ok(subkey) = uninstall_key.open(&subkey_name) {
-                // Try "InstallLocation"
-                if let Some(install_loc) = subkey.get_string("InstallLocation").ok().filter(|s| !s.is_empty()) {
-                    let path = PathBuf::from(&install_loc);
-                    // Heuristic: check if there's a 'bin' folder, otherwise use root
-                    let bin_path = path.join("bin");
-                    if bin_path.exists() {
-                        add_dir_candidates(map, &bin_path, "registry_uninstall");
-                    } else if path.exists() {
-                        add_dir_candidates(map, &path, "registry_uninstall");
+    // Check both HKCU (Current User) and HKLM (Local Machine / System-wide)
+    let hives = [
+        (CURRENT_USER, "HKCU_Uninstall"), 
+        (LOCAL_MACHINE, "HKLM_Uninstall")
+    ];
+
+    for (hive, source_label) in hives {
+        if let Ok(uninstall_key) = hive.open(key_path) {
+            for subkey_name in uninstall_key.keys().into_iter().flatten() {
+                if let Ok(subkey) = uninstall_key.open(&subkey_name) {
+                    // Try "InstallLocation"
+                    if let Some(install_loc) = subkey.get_string("InstallLocation").ok().filter(|s| !s.is_empty()) {
+                        let path = PathBuf::from(&install_loc);
+                        // Heuristic: check if there's a 'bin' folder, otherwise use root
+                        let bin_path = path.join("bin");
+                        if bin_path.exists() {
+                            add_dir_candidates(map, &bin_path, source_label);
+                        } else if path.exists() {
+                            add_dir_candidates(map, &path, source_label);
+                        }
                     }
                 }
             }
