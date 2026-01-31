@@ -15,7 +15,7 @@ use std::io::Write;
 use anyhow::{Result, bail};
 use log::{info, debug, warn, error};
 use windows_registry::CURRENT_USER;
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{LPARAM, WPARAM};
 use crate::discovery;
 
 /// The main entry point for the healing logic.
