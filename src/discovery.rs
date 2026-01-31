@@ -63,21 +63,17 @@ fn scan_registry_uninstall(map: &mut HashMap<String, Vec<Candidate>>) {
     let key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
     
     if let Ok(uninstall_key) = hive.open(key_path) {
-        if let Ok(keys) = uninstall_key.keys() {
-            for subkey_name in keys {
-                if let Ok(subkey) = uninstall_key.open(&subkey_name) {
-                    // Try "InstallLocation"
-                    if let Ok(install_loc) = subkey.get_string("InstallLocation") {
-                        if !install_loc.is_empty() {
-                            let path = PathBuf::from(&install_loc);
-                            // Heuristic: check if there's a 'bin' folder, otherwise use root
-                            let bin_path = path.join("bin");
-                            if bin_path.exists() {
-                                add_dir_candidates(map, &bin_path, "registry_uninstall");
-                            } else if path.exists() {
-                                add_dir_candidates(map, &path, "registry_uninstall");
-                            }
-                        }
+        for subkey_name in uninstall_key.keys().into_iter().flatten() {
+            if let Ok(subkey) = uninstall_key.open(&subkey_name) {
+                // Try "InstallLocation"
+                if let Some(install_loc) = subkey.get_string("InstallLocation").ok().filter(|s| !s.is_empty()) {
+                    let path = PathBuf::from(&install_loc);
+                    // Heuristic: check if there's a 'bin' folder, otherwise use root
+                    let bin_path = path.join("bin");
+                    if bin_path.exists() {
+                        add_dir_candidates(map, &bin_path, "registry_uninstall");
+                    } else if path.exists() {
+                        add_dir_candidates(map, &path, "registry_uninstall");
                     }
                 }
             }
@@ -145,21 +141,21 @@ fn add_dir_candidates(map: &mut HashMap<String, Vec<Candidate>>, dir: &PathBuf, 
     
     for entry in walker.into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.is_file() {
-            if let Some(stem) = path.file_stem() {
-                if let Some(ext) = path.extension() {
-                    let ext_str = ext.to_string_lossy().to_lowercase();
-                    // We only care about executables for Windows
-                    if ext_str == "exe" || ext_str == "cmd" || ext_str == "bat" || ext_str == "com" {
-                        let cmd_name = stem.to_string_lossy().to_lowercase();
-                        
-                        // Add to map
-                        map.entry(cmd_name).or_insert_with(Vec::new).push(Candidate {
-                            path: dir.to_path_buf(), // Store the *directory* containing the tool
-                            _source: source.to_string(),
-                        });
-                    }
-                }
+        if !path.is_file() {
+            continue;
+        }
+
+        if let (Some(stem), Some(ext)) = (path.file_stem(), path.extension()) {
+            let ext_str = ext.to_string_lossy().to_lowercase();
+            // We only care about executables for Windows
+            if ext_str == "exe" || ext_str == "cmd" || ext_str == "bat" || ext_str == "com" {
+                let cmd_name = stem.to_string_lossy().to_lowercase();
+                
+                // Add to map
+                map.entry(cmd_name).or_default().push(Candidate {
+                    path: dir.to_path_buf(), // Store the *directory* containing the tool
+                    _source: source.to_string(),
+                });
             }
         }
     }

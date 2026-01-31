@@ -50,10 +50,8 @@ pub fn heal_path(dry_run: bool) -> Result<()> {
             .map(|p| {
                 // Convert C:\Path\To to /c/Path/To
                 let s = p.replace(":", "").replace("\\", "/");
-                if let Some(first_char) = s.chars().next() {
-                    if first_char.is_alphabetic() {
-                         return format!("/{}{}", first_char.to_lowercase(), &s[1..]);
-                    }
+                if let Some(first_char) = s.chars().next().filter(|c| c.is_alphabetic()) {
+                     return format!("/{}{}", first_char.to_lowercase(), &s[1..]);
                 }
                 s // Fallback
             })
@@ -163,7 +161,7 @@ fn build_minimal_path(map: &HashMap<String, Vec<discovery::Candidate>>) -> Strin
     
     let mut other_dirs: Vec<PathBuf> = Vec::new();
     
-    for (_cmd, candidates) in map {
+    for candidates in map.values() {
         for candidate in candidates {
             let norm = normalize_path(&candidate.path);
             if !seen_paths.contains(&norm) {
@@ -189,7 +187,7 @@ fn build_minimal_path(map: &HashMap<String, Vec<discovery::Candidate>>) -> Strin
 /// Normalizes a path for comparison.
 ///
 /// - Lowercases the string (Windows is case-insensitive).
-fn normalize_path(p: &PathBuf) -> PathBuf {
+fn normalize_path(p: &std::path::Path) -> PathBuf {
     let s = p.to_string_lossy().to_string().to_lowercase();
     PathBuf::from(s)
 }
