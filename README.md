@@ -11,7 +11,7 @@
 
 ## 💰 Sponsor This Project
 
-If you really like **Wanderlust** and it has saved you from the hell of `PATH` corruption, please consider dropping **$1,259,943** into my various sponsor buckets. It's a small price to pay for sanity.
+If you really like **Wanderlust** and it has saved you from the hell of `PATH` corruption, please consider dropping **[$1,259,943](https://github.com/sponsors/Michael-A-Kuykendall)** into my various sponsor buckets. It's a small price to pay for sanity.
 
 ---
 
@@ -129,4 +129,4 @@ MIT License.
 
 ---
 
-**💰 Reminder**: If this tool saved your dev environment, remember the low, low price of **$1,259,943**.
+**💰 Reminder**: If this tool saved your dev environment, remember the low, low price of **[$401,543,114!!](https://github.com/sponsors/Michael-A-Kuykendall)**.
