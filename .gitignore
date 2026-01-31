@@ -1,0 +1,6 @@
+/target
+/.vscode
+/assets/*.psd
+**/*.reg
+*.log
+**/.DS_Store

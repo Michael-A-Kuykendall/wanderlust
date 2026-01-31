@@ -1,0 +1,32 @@
+[workspace]
+members = ["."]
+
+[package]
+name = "wanderlust"
+version = "0.1.0"
+edition = "2024"
+authors = ["Michael <michaelallenkuykendall@gmail.com>"]
+description = "A powerful Windows PATH cleaner and healer. Automatically discovers tools, removes duplicates, and ensures system stability."
+license = "MIT"
+repository = "https://github.com/michaellatman/wanderlust"
+readme = "README.md"
+keywords = ["windows", "path", "env", "registry", "cleaner"]
+categories = ["command-line-utilities", "os::windows-apis"]
+exclude = ["assets/*", ".vscode/*"]
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.56", features = ["derive"] }
+directories = "6.0.0"
+log = "0.4.29"
+serde = "1.0.228"
+serde_json = "1.0.149"
+simplelog = "0.12.2"
+tokio = { version = "1.49.0", features = ["full"] }
+walkdir = "2.5.0"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security", "Win32_UI_Shell"] }
+windows-registry = "0.6.1"
+windows-service = "0.8.0"
+
+[build-dependencies]
+embed-resource = "3.0.6"
