@@ -9,10 +9,7 @@
 use clap::{Parser, Subcommand};
 use log::{info, error, warn, LevelFilter};
 use simplelog::{Config, SimpleLogger};
-
-mod cleaner;
-mod discovery;
-mod elevation;
+use wanderlust::{cleaner, elevation};
 
 /// The primary Command Line Interface (CLI) configuration.
 ///
@@ -83,18 +80,10 @@ fn main() {
 
     match &cli.command {
         Some(Commands::Heal { dry_run }) => {
-            // Check for elevation if we are going to write to the Registry (non-dry-run)
-            if !*dry_run && !elevation::is_elevated() {
-                warn!("Access might be denied. Attempting to elevate privileges...");
-                if elevation::relaunch_as_admin() {
-                    // If relaunch was successful, the new process handles it. We exit.
-                    return;
-                } else {
-                    error!("Failed to elevate. Continuing with current privileges (this might fail)...");
-                }
-            }
-
-            info!("Starting self-healing process...");
+            // User PATH (HKCU) does NOT require elevation - normal user can write to it
+            // System PATH (HKLM) requires Admin, but we handle that gracefully in clean_system_path
+            // So we just run directly - no elevation needed for the common case
+            
             if let Err(e) = cleaner::heal_path(*dry_run) {
                 error!("Failed to heal PATH: {}", e);
                 std::process::exit(1);

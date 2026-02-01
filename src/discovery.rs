@@ -30,6 +30,8 @@ pub struct Candidate {
     pub _source: String, 
 }
 
+use crate::invariant_ppt::assert_invariant;
+
 /// The main entry point for discovery.
 ///
 /// Scans the system using multiple strategies and returns a map where:
@@ -48,6 +50,22 @@ pub fn discover_candidates() -> HashMap<String, Vec<Candidate>> {
 
     // 3. Scan existing PATH (to not lose what we already have, just clean it)
     scan_existing_path(&mut map);
+
+    // INVARIANT: We must have discovered *something*. An empty map implies a broken system or logic.
+    assert_invariant(
+        !map.is_empty(),
+        "Discovery phase yielded zero candidates. System appears to be empty or unreadable.",
+        Some("Discovery")
+    );
+
+    // INVARIANT: All keys must be lowercase to ensure case-insensitive matching logic holds.
+    for key in map.keys() {
+        assert_invariant(
+            key == &key.to_lowercase(),
+            &format!("Discovery key '{}' is not lowercase", key),
+            Some("Discovery")
+        );
+    }
 
     map
 }
