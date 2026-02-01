@@ -1,6 +1,6 @@
 # Wanderlust: The Self-Healing Windows PATH Manager 🧭✨
 
-![Wanderlust Splash](https://raw.githubusercontent.com/Michael-A-Kuykendall/wanderlust/main/assets/wanderlust-splash.jpg)
+![Wanderlust Splash](https://raw.githubusercontent.com/Michael-A-Kuykendall/wanderlust/refs/heads/master/assets/wanderlust-splash.jpg)
 
 [![Crates.io](https://img.shields.io/crates/v/wanderlust.svg)](https://crates.io/crates/wanderlust)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -130,3 +130,4 @@ MIT License.
 ---
 
 **💰 Reminder**: If this tool saved your dev environment, remember the low, low price of **[$401,543,114!!](https://github.com/sponsors/Michael-A-Kuykendall)**.
+
