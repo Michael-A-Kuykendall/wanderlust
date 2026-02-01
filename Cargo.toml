@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name = "wanderlust"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 authors = ["Michael <michaelallenkuykendall@gmail.com>"]
 description = "A powerful Windows PATH cleaner and healer. Automatically discovers tools, removes duplicates, and ensures system stability."

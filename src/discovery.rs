@@ -131,10 +131,71 @@ fn scan_common_locations(map: &mut HashMap<String, Vec<Candidate>>) {
         if scoop_shims.exists() {
              add_dir_candidates(map, &scoop_shims, "scoop");
         }
+
+        // Python installations (Windows Store and python.org installer)
+        // User installs go to: %LOCALAPPDATA%\Programs\Python\Python3XX\
+        let python_base = home.join("AppData").join("Local").join("Programs").join("Python");
+        if python_base.exists() {
+            if let Ok(entries) = std::fs::read_dir(&python_base) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        // Match Python3XX directories (not Launcher)
+                        if name.starts_with("Python3") {
+                            add_dir_candidates(map, &path, "python");
+                            // Also add Scripts subdirectory (pip, etc.)
+                            let scripts = path.join("Scripts");
+                            if scripts.exists() {
+                                add_dir_candidates(map, &scripts, "python_scripts");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     
-    // Add more predictable locations here (Program Files, etc) if needed, 
-    // though Registry scan covers most "installed" things.
+    // System-wide Python installations
+    for drive in ["C:", "D:"] {
+        // Old-style: C:\Python3XX
+        let drive_path = PathBuf::from(drive);
+        if let Ok(entries) = std::fs::read_dir(&drive_path) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    if name.starts_with("Python3") {
+                        add_dir_candidates(map, &path, "python_system");
+                        let scripts = path.join("Scripts");
+                        if scripts.exists() {
+                            add_dir_candidates(map, &scripts, "python_scripts");
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Program Files style: C:\Program Files\Python3XX
+        for pf in ["Program Files", "Program Files (x86)"] {
+            let pf_path = drive_path.join(pf);
+            if let Ok(entries) = std::fs::read_dir(&pf_path) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        if name.starts_with("Python3") {
+                            add_dir_candidates(map, &path, "python_system");
+                            let scripts = path.join("Scripts");
+                            if scripts.exists() {
+                                add_dir_candidates(map, &scripts, "python_scripts");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Scans the current environment variable `PATH`.
