@@ -14,11 +14,11 @@
 //!
 //! The result is a unified map of `Command Name -> List of Directories`.
 
+use log::debug;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
-use log::debug;
 
 /// Represents a potential location for a specific command.
 #[derive(Debug, Clone)]
@@ -27,7 +27,7 @@ pub struct Candidate {
     pub path: PathBuf,
     /// The origin of this discovery (e.g., "scoop", "registry", "cargo").
     /// This is currently used for debugging but will drive ranking logic in v2.0.
-    pub _source: String, 
+    pub _source: String,
 }
 
 use crate::invariant_ppt::assert_invariant;
@@ -55,7 +55,7 @@ pub fn discover_candidates() -> HashMap<String, Vec<Candidate>> {
     assert_invariant(
         !map.is_empty(),
         "Discovery phase yielded zero candidates. System appears to be empty or unreadable.",
-        Some("Discovery")
+        Some("Discovery"),
     );
 
     // INVARIANT: All keys must be lowercase to ensure case-insensitive matching logic holds.
@@ -63,7 +63,7 @@ pub fn discover_candidates() -> HashMap<String, Vec<Candidate>> {
         assert_invariant(
             key == &key.to_lowercase(),
             &format!("Discovery key '{}' is not lowercase", key),
-            Some("Discovery")
+            Some("Discovery"),
         );
     }
 
@@ -76,11 +76,11 @@ pub fn discover_candidates() -> HashMap<String, Vec<Candidate>> {
 /// If a `bin` directory exists inside the install location, that is preferred.
 fn scan_registry_uninstall(map: &mut HashMap<String, Vec<Candidate>>) {
     let key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
-    
+
     // Check both HKCU (Current User) and HKLM (Local Machine / System-wide)
     let hives = [
-        (CURRENT_USER, "HKCU_Uninstall"), 
-        (LOCAL_MACHINE, "HKLM_Uninstall")
+        (CURRENT_USER, "HKCU_Uninstall"),
+        (LOCAL_MACHINE, "HKLM_Uninstall"),
     ];
 
     for (hive, source_label) in hives {
@@ -88,7 +88,11 @@ fn scan_registry_uninstall(map: &mut HashMap<String, Vec<Candidate>>) {
             for subkey_name in uninstall_key.keys().into_iter().flatten() {
                 if let Ok(subkey) = uninstall_key.open(&subkey_name) {
                     // Try "InstallLocation"
-                    if let Some(install_loc) = subkey.get_string("InstallLocation").ok().filter(|s| !s.is_empty()) {
+                    if let Some(install_loc) = subkey
+                        .get_string("InstallLocation")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                    {
                         let path = PathBuf::from(&install_loc);
                         // Heuristic: check if there's a 'bin' folder, otherwise use root
                         let bin_path = path.join("bin");
@@ -113,7 +117,7 @@ fn scan_registry_uninstall(map: &mut HashMap<String, Vec<Candidate>>) {
 fn scan_common_locations(map: &mut HashMap<String, Vec<Candidate>>) {
     if let Some(user_profile) = directories::UserDirs::new() {
         let home = user_profile.home_dir();
-        
+
         // Cargo
         let cargo_bin = home.join(".cargo").join("bin");
         if cargo_bin.exists() {
@@ -125,22 +129,30 @@ fn scan_common_locations(map: &mut HashMap<String, Vec<Candidate>>) {
         if local_bin.exists() {
             add_dir_candidates(map, &local_bin, "local_bin");
         }
-        
+
         // Scoop shims
         let scoop_shims = home.join("scoop").join("shims");
         if scoop_shims.exists() {
-             add_dir_candidates(map, &scoop_shims, "scoop");
+            add_dir_candidates(map, &scoop_shims, "scoop");
         }
 
         // Python installations (Windows Store and python.org installer)
         // User installs go to: %LOCALAPPDATA%\Programs\Python\Python3XX\
-        let python_base = home.join("AppData").join("Local").join("Programs").join("Python");
-        if python_base.exists() {
-            if let Ok(entries) = std::fs::read_dir(&python_base) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let python_base = home
+            .join("AppData")
+            .join("Local")
+            .join("Programs")
+            .join("Python");
+        let entries = if python_base.exists() {
+            std::fs::read_dir(&python_base).ok()
+        } else {
+            None
+        };
+        if let Some(entries) = entries {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
                         // Match Python3XX directories (not Launcher)
                         if name.starts_with("Python3") {
                             add_dir_candidates(map, &path, "python");
@@ -154,8 +166,7 @@ fn scan_common_locations(map: &mut HashMap<String, Vec<Candidate>>) {
                 }
             }
         }
-    }
-    
+
     // System-wide Python installations
     for drive in ["C:", "D:"] {
         // Old-style: C:\Python3XX
@@ -175,7 +186,7 @@ fn scan_common_locations(map: &mut HashMap<String, Vec<Candidate>>) {
                 }
             }
         }
-        
+
         // Program Files style: C:\Program Files\Python3XX
         for pf in ["Program Files", "Program Files (x86)"] {
             let pf_path = drive_path.join(pf);
@@ -205,7 +216,9 @@ fn scan_common_locations(map: &mut HashMap<String, Vec<Candidate>>) {
 fn scan_existing_path(map: &mut HashMap<String, Vec<Candidate>>) {
     if let Ok(path_var) = std::env::var("PATH") {
         for part in path_var.split(';') {
-            if part.is_empty() { continue; }
+            if part.is_empty() {
+                continue;
+            }
             let path = PathBuf::from(part);
             if path.exists() {
                 add_dir_candidates(map, &path, "existing_path");
@@ -222,7 +235,7 @@ fn add_dir_candidates(map: &mut HashMap<String, Vec<Candidate>>, dir: &PathBuf, 
     debug!("Scanning directory: {:?}", dir);
     // Only go 1 level deep
     let walker = WalkDir::new(dir).max_depth(1);
-    
+
     for entry in walker.into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() {
@@ -234,7 +247,7 @@ fn add_dir_candidates(map: &mut HashMap<String, Vec<Candidate>>, dir: &PathBuf, 
             // We only care about executables for Windows
             if ext_str == "exe" || ext_str == "cmd" || ext_str == "bat" || ext_str == "com" {
                 let cmd_name = stem.to_string_lossy().to_lowercase();
-                
+
                 // Add to map
                 map.entry(cmd_name).or_default().push(Candidate {
                     path: dir.to_path_buf(), // Store the *directory* containing the tool

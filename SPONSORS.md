@@ -8,26 +8,24 @@ Thank you to all our sponsors who help keep Wanderlust free forever!
 *Be the first!*
 
 ### Corporate Backers ($100+/month)
-
-[![ZephyrCloudIO](https://github.com/ZephyrCloudIO.png?size=80)](https://github.com/ZephyrCloudIO)
-
-**[ZephyrCloudIO](https://github.com/ZephyrCloudIO)** - Corporate Backer (joined December 25th, 2025)
+*Your logo could be here*
 
 ### Developer Supporters ($25+/month)
 *Be the first!*
 
 ### Coffee Heroes ($5+/month)
-- alistairheath
+*Your support could be here*
 
 ## Why Sponsor?
 
 **Wanderlust is free forever.** No paid tiers, no enterprise upsells, no bait-and-switch.
 
 Your sponsorship helps:
+- Maintain Windows compatibility (Windows 10, 11, Server)
 - Fix bugs faster with dedicated support
 - Improve documentation and examples
-- Add new features
-- Expand test coverage across more platforms
+- Add new features (WSL integration, registry health monitoring)
+- Expand test coverage across more Windows environments
 
 ## Sponsorship Tiers
 

@@ -29,7 +29,7 @@ It runs silently in the background, keeping your `PATH` clean, deduplicated, and
 
 ## 🧭 What is Wanderlust?
 
-Wanderlust is a **self-healing, administration-level daemon** for Windows that autonomously manages your System and User `PATH` environment variables. It eliminates the "Command Not Found" errors caused by installer bloat, broken registries, and stale shell sessions.
+Wanderlust is a **self-healing Windows scheduled task** that autonomously manages your System and User `PATH` environment variables. It eliminates the "Command Not Found" errors caused by installer bloat, broken registries, and stale shell sessions.
 
 | Feature | Wanderlust 🧭 | Manual Editing | Other Tools |
 |---------|---------------|----------------|-------------|
@@ -138,5 +138,5 @@ MIT License.
 
 ---
 
-**💰 Reminder**: If this tool saved your dev environment, remember the low, low price of **[$401,543,114!!](https://github.com/sponsors/Michael-A-Kuykendall)**.
+**Want to support Wanderlust?** [Become a sponsor](https://github.com/sponsors/Michael-A-Kuykendall) — every dollar keeps it free forever.
 

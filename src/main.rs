@@ -7,7 +7,7 @@
 //! The application is designed to be run as an Administrator (for `heal`, `install`, `uninstall`).
 
 use clap::{Parser, Subcommand};
-use log::{info, error, warn, LevelFilter};
+use log::{LevelFilter, error, info, warn};
 use simplelog::{Config, SimpleLogger};
 use wanderlust::{cleaner, elevation};
 
@@ -83,7 +83,7 @@ fn main() {
             // User PATH (HKCU) does NOT require elevation - normal user can write to it
             // System PATH (HKLM) requires Admin, but we handle that gracefully in clean_system_path
             // So we just run directly - no elevation needed for the common case
-            
+
             if let Err(e) = cleaner::heal_path(*dry_run) {
                 error!("Failed to heal PATH: {}", e);
                 std::process::exit(1);
@@ -97,15 +97,16 @@ fn main() {
         Some(Commands::Install) => {
             // Installation strictly requires Admin rights to modify Scheduled Tasks.
             if !elevation::is_elevated() {
-                 warn!("Installation requires admin rights. Attempting to elevate...");
-                 if elevation::relaunch_as_admin() {
-                     return;
-                 }
-                 error!("Elevation failed. Installation will likely fail.");
+                warn!("Installation requires admin rights. Attempting to elevate...");
+                if elevation::relaunch_as_admin() {
+                    return;
+                }
+                error!("Elevation failed. Installation will likely fail.");
             }
 
             // Reliable way to get the absolute path of the currently running binary.
-            let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("wanderlust.exe"));
+            let exe_path = std::env::current_exe()
+                .unwrap_or_else(|_| std::path::PathBuf::from("wanderlust.exe"));
             let exe_str = exe_path.to_string_lossy();
 
             info!("Installing scheduled task 'WanderlustHeal'...");
@@ -121,7 +122,10 @@ fn main() {
             // /NP               -> No Password required (can run non-interactively)
             // /F                -> Force create (overwrite existing)
 
-            let arg_command = format!("powershell -WindowStyle Hidden -Command '& \"{}\" heal'", exe_str);
+            let arg_command = format!(
+                "powershell -WindowStyle Hidden -Command '& \"{}\" heal'",
+                exe_str
+            );
 
             let status = std::process::Command::new("schtasks")
                 .arg("/Create")
@@ -133,14 +137,16 @@ fn main() {
                 .arg("WanderlustHeal")
                 .arg("/TR")
                 .arg(arg_command)
-                .arg("/F") 
+                .arg("/F")
                 .arg("/RL")
-                .arg("HIGHEST") 
-                .arg("/NP")    
+                .arg("HIGHEST")
+                .arg("/NP")
                 .status();
 
             match status {
-                Ok(s) if s.success() => info!("Successfully installed scheduled task. Wanderlust will run every 30 minutes (hidden)."),     
+                Ok(s) if s.success() => info!(
+                    "Successfully installed scheduled task. Wanderlust will run every 30 minutes (hidden)."
+                ),
                 Ok(s) => error!("Failed to install task. Exit code: {:?}", s.code()),
                 Err(e) => error!("Failed to execute schtasks: {}", e),
             }
@@ -155,9 +161,12 @@ fn main() {
                 .arg("/F")
                 .status();
 
-             match status {
+            match status {
                 Ok(s) if s.success() => info!("Successfully uninstalled scheduled task."),
-                Ok(s) => error!("Failed to uninstall task (maybe it doesn't exist?). Exit code: {:?}", s.code()),
+                Ok(s) => error!(
+                    "Failed to uninstall task (maybe it doesn't exist?). Exit code: {:?}",
+                    s.code()
+                ),
                 Err(e) => error!("Failed to execute schtasks: {}", e),
             }
         }

@@ -1,7 +1,7 @@
-use std::collections::HashSet;
-use std::sync::Mutex;
 use lazy_static::lazy_static;
 use log::{error, info};
+use std::collections::HashSet;
+use std::sync::Mutex;
 
 lazy_static! {
     /// Stores the set of unique invariant keys (descriptions) that have been successfully asserted.
@@ -9,7 +9,7 @@ lazy_static! {
 }
 
 /// Asserts that a critical system invariant holds true.
-/// 
+///
 /// If the condition is false, this will panic (in debug/test) or log a critical error (in prod).
 /// If true, it records that this invariant was explicitly checked, allowing for "Contract Tests".
 ///
@@ -20,12 +20,12 @@ lazy_static! {
 pub fn assert_invariant(condition: bool, description: &str, component: Option<&str>) {
     if !condition {
         let msg = format!(
-            "CRITICAL INVARIANT VIOLATION [{}]: {}", 
-            component.unwrap_or("General"), 
+            "CRITICAL INVARIANT VIOLATION [{}]: {}",
+            component.unwrap_or("General"),
             description
         );
         error!("{}", msg);
-        
+
         // In test/debug, we want to crash immediately to catch this.
         // In production, we might want to survive, but for now, let's panic to be safe.
         // "Fail Closed" is usually safer for system tools.
@@ -41,7 +41,7 @@ pub fn assert_invariant(condition: bool, description: &str, component: Option<&s
 }
 
 /// A "Contract Test" verifies that specific invariants were actually checked during execution.
-/// 
+///
 /// This ensures that your business logic actually enforces the rules you think it does.
 ///
 /// # Arguments

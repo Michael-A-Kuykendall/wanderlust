@@ -10,12 +10,12 @@
 //! **Note**: The current strategy prefers `HKCU`, so `heal` might *not* actually require Admin.
 //! But `discovery` of `C:\Program Files` is easier with read permissions (usually standard user is fine).
 
+use log::info;
 use std::ffi::CString;
-use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::ShellExecuteA;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
-use log::info;
 
 /// Checks if the current process has administrative privileges.
 ///
@@ -37,7 +37,9 @@ pub fn is_elevated() -> bool {
                 Some(&mut elevation as *mut _ as *mut _),
                 std::mem::size_of::<TOKEN_ELEVATION>() as u32,
                 &mut size,
-            ).is_ok() {
+            )
+            .is_ok()
+            {
                 return elevation.TokenIsElevated != 0;
             }
         }
@@ -63,12 +65,12 @@ pub fn relaunch_as_admin() -> bool {
             Ok(s) => s,
             Err(_) => return false,
         };
-        
+
         // Reconstruct the command line arguments
         let args: Vec<String> = std::env::args().skip(1).collect();
         let args_str = match CString::new(args.join(" ")) {
             Ok(s) => s,
-            Err(_) => return false, 
+            Err(_) => return false,
         };
 
         info!("Relaunching as admin: {:?} {:?}", exe_path, args);
@@ -84,7 +86,7 @@ pub fn relaunch_as_admin() -> bool {
                 windows::core::PCSTR(exe_path_str.as_ptr() as *const _),
                 windows::core::PCSTR(args_str.as_ptr() as *const _),
                 windows::core::PCSTR(std::ptr::null()), // Working directory (NULL = current)
-                SW_SHOW, // Show command normally
+                SW_SHOW,                                // Show command normally
             );
 
             // ShellExecute returns an HINSTANCE > 32 on success.

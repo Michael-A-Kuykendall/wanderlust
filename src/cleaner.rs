@@ -8,16 +8,37 @@
 //!
 //! It also handles the generation of POSIX-compatible cache files for Git Bash / MSYS2 integration.
 
-use std::collections::{HashSet, HashMap};
-use std::path::PathBuf;
-use std::fs::File;
-use std::io::Write;
-use anyhow::{Result, bail};
-use log::{info, debug, warn, error};
-use windows_registry::CURRENT_USER;
 use crate::discovery;
 use crate::invariant_ppt::*;
 use crate::system::{SystemOps, WindowsSystem};
+use anyhow::{Result, bail};
+use log::{error, info};
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::Write;
+use std::path::PathBuf;
+use windows_registry::CURRENT_USER;
+
+// The following are only used by production-only integration (history, logs,
+// backup lock) that is intentionally compiled out of `#[cfg(test)]` so unit
+// tests stay hermetic and fast.
+#[cfg(not(test))]
+use crate::backup_lock::BackupLock;
+#[cfg(not(test))]
+use crate::logging;
+#[cfg(not(test))]
+use crate::store;
+#[cfg(not(test))]
+use serde_json;
+#[cfg(not(test))]
+use std::time::Duration;
+
+/// Resolves the Wanderlust application data directory
+/// (`%LOCALAPPDATA%\wanderlust`), used for backups, history, and logs.
+#[cfg(not(test))]
+fn app_data_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|b| b.data_local_dir().join("wanderlust"))
+}
 
 /// The main entry point for the healing logic.
 ///
@@ -30,16 +51,28 @@ use crate::system::{SystemOps, WindowsSystem};
 /// Returns `Ok(())` on success, or an `anyhow::Result` error if Registry access fails or verification breaks.
 pub fn heal_path(dry_run: bool) -> Result<()> {
     let system = WindowsSystem;
-    
+
     // Discovery runs silently - user doesn't need to see this
     let candidates_map = discovery::discover_candidates();
-    
+
+    heal_path_with_system(&candidates_map, &system, dry_run)
+}
+
+/// Runs both PATH scopes through an injectable system boundary.
+///
+/// This preserves the current production sequencing while allowing tests to observe whether a
+/// System-scope failure is incorrectly discarded before User-scope processing begins.
+fn heal_path_with_system(
+    candidates_map: &HashMap<String, Vec<discovery::Candidate>>,
+    system: &impl SystemOps,
+    dry_run: bool,
+) -> Result<()> {
     // First, clean the SYSTEM PATH (HKLM) - this removes duplicates from the machine-wide config
     // Silently skip if not admin - the dry-run output will explain
-    let _ = clean_system_path(&system, dry_run);
-    
+    clean_system_path(system, dry_run)?;
+
     // Then heal the User PATH with discovery results
-    run_healing(&candidates_map, &system, dry_run)
+    run_healing(candidates_map, system, dry_run)
 }
 
 /// Cleans the System PATH (HKLM) by removing duplicates.
@@ -47,36 +80,43 @@ pub fn heal_path(dry_run: bool) -> Result<()> {
 /// Requires Admin privileges.
 fn clean_system_path(system: &impl SystemOps, dry_run: bool) -> Result<()> {
     let system_path = system.read_system_path_registry()?;
-    
+
     let mut seen: HashSet<String> = HashSet::new();
     let mut cleaned: Vec<String> = Vec::new();
-    
+
     for part in system_path.split(';') {
-        if part.is_empty() { continue; }
+        if part.is_empty() {
+            continue;
+        }
         let normalized = part.to_lowercase();
         if !seen.contains(&normalized) {
             seen.insert(normalized);
             cleaned.push(part.to_string()); // Keep original casing
         }
     }
-    
+
     let new_system_path = cleaned.join(";");
-    
+
     let old_count = system_path.split(';').filter(|s| !s.is_empty()).count();
     let new_count = cleaned.len();
-    
+
     if old_count == new_count {
         info!("System PATH already clean ({} entries)", new_count);
         return Ok(());
     }
-    
-    info!("System PATH: {} -> {} entries (removing {} duplicates)", old_count, new_count, old_count - new_count);
-    
+
+    info!(
+        "System PATH: {} -> {} entries (removing {} duplicates)",
+        old_count,
+        new_count,
+        old_count - new_count
+    );
+
     if dry_run {
         println!("--- DRY RUN: System PATH would be cleaned ---");
         return Ok(());
     }
-    
+
     system.write_system_path_registry(&new_system_path)?;
     info!("System PATH cleaned successfully");
     Ok(())
@@ -86,79 +126,99 @@ fn clean_system_path(system: &impl SystemOps, dry_run: bool) -> Result<()> {
 pub fn run_healing(
     candidates_map: &HashMap<String, Vec<discovery::Candidate>>,
     system: &impl SystemOps,
-    dry_run: bool
+    dry_run: bool,
 ) -> Result<()> {
     // Get current User PATH for comparison
     let current_user_path = system.read_user_path_registry().unwrap_or_default();
-    let current_entries: HashSet<String> = current_user_path.split(';')
+    let current_entries: HashSet<String> = current_user_path
+        .split(';')
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_lowercase())
+        .map(str::to_lowercase)
         .collect();
-    
+
     let new_path_string = build_minimal_path(candidates_map);
-    
-    let new_entries: HashSet<String> = new_path_string.split(';')
+
+    let new_entries: HashSet<String> = new_path_string
+        .split(';')
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_lowercase())
+        .map(str::to_lowercase)
         .collect();
-    
+
     // Calculate what's changing
-    let removing: Vec<&str> = current_user_path.split(';')
+    let removing: Vec<&str> = current_user_path
+        .split(';')
         .filter(|s| !s.is_empty())
         .filter(|s| !new_entries.contains(&s.to_lowercase()))
         .collect();
-    
-    let adding: Vec<&str> = new_path_string.split(';')
+
+    let adding: Vec<&str> = new_path_string
+        .split(';')
         .filter(|s| !s.is_empty())
         .filter(|s| !current_entries.contains(&s.to_lowercase()))
         .collect();
-    
+
     if dry_run {
         println!();
         println!("═══════════════════════════════════════════════════════════════");
         println!("                   What Wanderlust Will Do");
         println!("═══════════════════════════════════════════════════════════════");
         println!();
-        
+
         // System PATH status
         let system_path = system.read_system_path_registry().unwrap_or_default();
         let sys_parts: Vec<&str> = system_path.split(';').filter(|s| !s.is_empty()).collect();
         let sys_unique: HashSet<&str> = sys_parts.iter().cloned().collect();
         let sys_dups = sys_parts.len() - sys_unique.len();
-        
+
         println!("SYSTEM PATH (shared by all users):");
         if sys_dups > 0 {
-            println!("  Currently has {} folders with {} duplicates.", sys_parts.len(), sys_dups);
+            println!(
+                "  Currently has {} folders with {} duplicates.",
+                sys_parts.len(),
+                sys_dups
+            );
             println!("  → Will remove duplicates (requires running as Administrator)");
         } else {
-            println!("  ✓ Already clean ({} folders, no duplicates)", sys_parts.len());
+            println!(
+                "  ✓ Already clean ({} folders, no duplicates)",
+                sys_parts.len()
+            );
         }
-        
+
         // User PATH changes
-        let before_count = current_user_path.split(';').filter(|s| !s.is_empty()).count();
+        let before_count = current_user_path
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .count();
         let after_count = new_path_string.split(';').filter(|s| !s.is_empty()).count();
-        
+
         println!();
         println!("USER PATH (just your tools):");
         println!("  Currently: {} folders", before_count);
         println!("  After:     {} folders", after_count);
-        
+
         if !removing.is_empty() {
             println!();
-            println!("  REMOVING {} folders (already in System PATH or duplicates):", removing.len());
+            println!(
+                "  REMOVING {} folders (already in System PATH or duplicates):",
+                removing.len()
+            );
             for p in &removing {
                 println!("    ✕ {}", p);
             }
         }
-        
+
         if !adding.is_empty() {
             println!();
-            println!("  ADDING {} folders (discovered tools not yet in PATH):", adding.len());
+            println!(
+                "  ADDING {} folders (discovered tools not yet in PATH):",
+                adding.len()
+            );
             for p in &adding {
                 println!("    + {}", p);
             }
         }
-        
+
         println!();
         println!("───────────────────────────────────────────────────────────────");
         if removing.is_empty() && adding.is_empty() && sys_dups == 0 {
@@ -170,7 +230,13 @@ pub fn run_healing(
             println!("(Changes only affect new terminals. Current terminal keeps old PATH.)");
         }
         println!();
-        
+
+        return Ok(());
+    }
+
+    // Fail-closed: if discovery produced no candidates, don't wipe existing PATH.
+    if new_path_string.is_empty() {
+        info!("Discovery returned no candidates. Leaving User PATH unchanged.");
         return Ok(());
     }
 
@@ -179,31 +245,60 @@ pub fn run_healing(
     if let Some(user_dirs) = directories::UserDirs::new() {
         // Get System PATH and convert to POSIX
         let system_path = system.read_system_path_registry().unwrap_or_default();
-        let system_posix: Vec<String> = system_path.split(';')
+        let system_posix: Vec<String> = system_path
+            .split(';')
             .filter(|s| !s.is_empty())
-            .map(|p| win_to_posix(p))
+            .map(win_to_posix)
             .collect();
-        
+
         // Convert User PATH to POSIX
-        let user_posix: Vec<String> = new_path_string.split(';')
+        let user_posix: Vec<String> = new_path_string
+            .split(';')
             .filter(|s| !s.is_empty())
-            .map(|p| win_to_posix(p))
+            .map(win_to_posix)
             .collect();
-        
+
         // Combine: System first, then User (matches Windows behavior)
         let full_posix = [system_posix, user_posix].concat().join(":");
-        
+
         let posix_file = user_dirs.home_dir().join(".wanderlust_posix");
         if let Ok(mut f) = File::create(&posix_file) {
-             let _ = writeln!(f, "{}", full_posix);
-             info!("Wrote POSIX path to {:?} ({} entries)", posix_file, full_posix.matches(':').count() + 1);
+            let _ = writeln!(f, "{}", full_posix);
+            info!(
+                "Wrote POSIX path to {:?} ({} entries)",
+                posix_file,
+                full_posix.matches(':').count() + 1
+            );
         }
     }
 
     // Apply the changes to the system
     apply_path(system, &new_path_string)?;
     info!("Successfully healed PATH!");
-    
+
+    // Persist a cross-session record and emit a structured log line so later
+    // runs (failure escalation, baselining, drift detection) can reason across
+    // heal cycles. Skipped under `#[cfg(test)]` to keep unit tests hermetic.
+    #[cfg(not(test))]
+    {
+        if let Some(dir) = app_data_dir() {
+            let _ = store::HistoryStore::new(&store::default_history_path(&dir)).append(
+                &store::HealingRecord::now(
+                    store::HealOutcome::Applied,
+                    removing.len(),
+                    adding.len(),
+                    "scheduled",
+                ),
+            );
+            let _ = logging::append_event(
+                &logging::default_log_path(&dir),
+                &logging::LogEvent::new(logging::Level::Info, "cleaner", "healed PATH").with_fields(
+                    serde_json::json!({ "removed": removing.len(), "added": adding.len() }),
+                ),
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -212,7 +307,7 @@ pub fn run_healing(
 /// This does not modify the system.
 pub fn doctor() -> Result<()> {
     let system = WindowsSystem;
-    
+
     println!();
     println!("═══════════════════════════════════════════════════════════════");
     println!("                      PATH Health Report");
@@ -226,11 +321,14 @@ pub fn doctor() -> Result<()> {
     let system_parts: Vec<&str> = system_path.split(';').filter(|s| !s.is_empty()).collect();
     let system_unique: HashSet<&str> = system_parts.iter().cloned().collect();
     let system_dups = system_parts.len() - system_unique.len();
-    
+
     println!("1. SYSTEM PATH ({} folders)", system_parts.len());
     println!("   Shared by all users. Has Windows, Program Files, etc.");
     if system_dups > 0 {
-        println!("   ⚠ Problem: {} duplicate entries (run as Admin to fix)", system_dups);
+        println!(
+            "   ⚠ Problem: {} duplicate entries (run as Admin to fix)",
+            system_dups
+        );
     } else {
         println!("   ✓ No duplicates");
     }
@@ -241,7 +339,7 @@ pub fn doctor() -> Result<()> {
     let user_parts: Vec<&str> = user_path.split(';').filter(|s| !s.is_empty()).collect();
     let user_unique: HashSet<&str> = user_parts.iter().cloned().collect();
     let user_dups = user_parts.len() - user_unique.len();
-    
+
     println!();
     println!("2. USER PATH ({} folders)", user_parts.len());
     println!("   Just for you. Has your tools like Python, Cargo, Scoop, etc.");
@@ -252,17 +350,20 @@ pub fn doctor() -> Result<()> {
     }
 
     // 3. Check for User entries that duplicate System entries
-    let system_normalized: HashSet<String> = system_parts.iter()
-        .map(|s| s.to_lowercase())
-        .collect();
-    let overlap: Vec<&str> = user_parts.iter()
+    let system_normalized: HashSet<String> =
+        system_parts.iter().map(|s| s.to_lowercase()).collect();
+    let overlap: Vec<&str> = user_parts
+        .iter()
         .filter(|p| system_normalized.contains(&p.to_lowercase()))
         .cloned()
         .collect();
-    
+
     if !overlap.is_empty() {
         println!();
-        println!("⚠ OVERLAP: {} folders appear in BOTH System and User PATH.", overlap.len());
+        println!(
+            "⚠ OVERLAP: {} folders appear in BOTH System and User PATH.",
+            overlap.len()
+        );
         println!("   This is wasteful. Examples:");
         for p in overlap.iter().take(3) {
             println!("     - {}", p);
@@ -278,14 +379,21 @@ pub fn doctor() -> Result<()> {
     println!();
     let total = system_parts.len() + user_parts.len();
     println!("When you open a terminal, Windows combines both:");
-    println!("  System ({}) + User ({}) = {} folders to search for commands", 
-             system_parts.len(), user_parts.len(), total);
-    
+    println!(
+        "  System ({}) + User ({}) = {} folders to search for commands",
+        system_parts.len(),
+        user_parts.len(),
+        total
+    );
+
     if let Ok(current) = std::env::var("PATH") {
         let current_count = current.split(';').filter(|s| !s.is_empty()).count();
         if current_count != total {
             println!();
-            println!("  Your current terminal has {} (Git Bash adds some extras).", current_count);
+            println!(
+                "  Your current terminal has {} (Git Bash adds some extras).",
+                current_count
+            );
         }
     }
 
@@ -312,58 +420,86 @@ pub fn doctor() -> Result<()> {
 /// 3.  **Discovery**: We append all discovered directories that contain executables.
 /// 4.  **No Windows paths**: System32, Windows, etc. belong in System PATH, not User PATH.
 fn build_minimal_path(map: &HashMap<String, Vec<discovery::Candidate>>) -> String {
-    // Read System PATH to avoid duplicating entries
+    // Read System PATH to avoid duplicating entries.
     let system = WindowsSystem;
-    let system_path_entries: HashSet<PathBuf> = system.read_system_path_registry()
-        .unwrap_or_default()
+    let system_path = system.read_system_path_registry().unwrap_or_default();
+    let system_path_entry_count = system_path
         .split(';')
-        .filter(|s| !s.is_empty())
-        .map(|s| normalize_path(&PathBuf::from(s)))
-        .collect();
-    
-    info!("System PATH has {} entries (will not duplicate these)", system_path_entries.len());
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| normalize_path(&PathBuf::from(entry)))
+        .collect::<HashSet<_>>()
+        .len();
+    info!(
+        "System PATH has {} entries (will not duplicate these)",
+        system_path_entry_count
+    );
 
-    let mut seen_paths: HashSet<PathBuf> = system_path_entries.clone();
+    let new_path = build_minimal_path_for_system_path(map, &system_path);
+    assert_user_path_invariant(&new_path);
+    new_path
+}
+
+/// Plans the discovery-only User PATH output against supplied System PATH state.
+///
+/// This is intentionally pure so tests can supply synthetic registry values without reading
+/// Windows state. `build_minimal_path` remains the production adapter and preserves its I/O.
+pub(crate) fn build_minimal_path_for_system_path(
+    map: &HashMap<String, Vec<discovery::Candidate>>,
+    system_path: &str,
+) -> String {
+    let system_path_entries: HashSet<PathBuf> = system_path
+        .split(';')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| normalize_path(&PathBuf::from(entry)))
+        .collect();
+    let mut seen_paths = system_path_entries;
     let mut user_paths: Vec<PathBuf> = Vec::new();
-    
-    // Collect all unique directories from discovery that aren't in System PATH
+
+    // Collect all unique directories from discovery that aren't in System PATH.
     for candidates in map.values() {
         for candidate in candidates {
             let norm = normalize_path(&candidate.path);
-            
-            // Skip Windows system directories - they belong in System PATH
+
+            // Skip Windows system directories - they belong in System PATH.
             let path_str = norm.to_string_lossy().to_lowercase();
             if path_str.contains("\\windows\\") || path_str.starts_with("c:\\windows") {
                 continue;
             }
-            
-            if !seen_paths.contains(&norm) {
-                seen_paths.insert(norm.clone());
+
+            if seen_paths.insert(norm.clone()) {
                 user_paths.push(norm);
             }
         }
     }
 
-    // Sort to ensure deterministic output
+    // Sort to ensure deterministic output.
     user_paths.sort();
-
-    // INVARIANT CHECK:
-    // User PATH can be empty if everything is in System PATH - that's actually ideal!
-    // But we should have SOMETHING if discovery found user tools
-    let has_user_tools = user_paths.iter().any(|p| {
-        let s = p.to_string_lossy().to_lowercase();
-        s.contains("users") || s.contains("appdata") || s.contains(".cargo")
-    });
-    
-    if !user_paths.is_empty() {
-        assert_invariant(has_user_tools || user_paths.len() > 0, "User PATH should contain user-specific paths", Some("Cleaner"));
-    }
-
-    // Join with Windows standard separator ';'
-    user_paths.iter()
-        .map(|p| p.to_string_lossy().to_string())
+    user_paths
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
         .collect::<Vec<_>>()
         .join(";")
+}
+
+/// Retains the existing invariant check at the production adapter boundary.
+fn assert_user_path_invariant(new_path: &str) {
+    if new_path.is_empty() {
+        return;
+    }
+
+    let entries: Vec<&str> = new_path
+        .split(';')
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    let has_user_tools = entries.iter().any(|entry| {
+        let entry = entry.to_lowercase();
+        entry.contains("users") || entry.contains("appdata") || entry.contains(".cargo")
+    });
+    assert_invariant(
+        has_user_tools || !entries.is_empty(),
+        "User PATH should contain user-specific paths",
+        Some("Cleaner"),
+    );
 }
 
 /// Normalizes a path for comparison.
@@ -399,18 +535,32 @@ fn win_to_posix(path: &str) -> String {
 /// 5.  **Verify**: Runs `cmd`, `powershell`, `whoami` to ensure the system is usable.
 /// 6.  **Rollback**: If verification fails, restores the old PATH and errors out.
 fn apply_path(system: &impl SystemOps, new_val: &str) -> Result<()> {
-    // NOTE: Empty User PATH is VALID - it means all paths are in System PATH
-    // This is actually the cleanest possible state
-    
     // 1. Open Registry Key (Read Old)
-    let old_val = system.read_user_path_registry().unwrap_or_default();
+    let old_val = system.read_user_path_registry()?;
+
+    // Fail-closed: an empty discovery plan must not wipe the existing User PATH.
+    if new_val.is_empty() && !old_val.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Refusing to replace non-empty User PATH with empty result"
+        ));
+    }
 
     // 2. Backup to %LOCALAPPDATA%\wanderlust\backup.reg
+    //
+    // Serialize backup + registry writes against any concurrently running heal
+    // cycle (e.g. overlapping scheduled tasks) so two instances can't clobber
+    // each other's `.reg` backup or last-known-good snapshot.
+    #[cfg(not(test))]
+    let _lock = directories::BaseDirs::new().map(|base| {
+        let app = base.data_local_dir().join("wanderlust");
+        BackupLock::new(&app, Duration::from_secs(30)).guard().ok()
+    });
+
     if let Some(base_dirs) = directories::BaseDirs::new() {
         let app_data = base_dirs.data_local_dir().join("wanderlust");
-        
+
         if let Err(e) = std::fs::create_dir_all(&app_data) {
-            warn!("Failed to create backup directory at {:?}: {}", app_data, e);
+            return Err(anyhow::anyhow!("Failed to create backup directory: {}", e));
         } else {
             let backup_path = app_data.join("backup.reg");
             // Escape backslashes for .reg file format ("\" -> "\\")
@@ -419,40 +569,40 @@ fn apply_path(system: &impl SystemOps, new_val: &str) -> Result<()> {
                 "Windows Registry Editor Version 5.00\n\n[HKEY_CURRENT_USER\\Environment]\n\"Path\"=\"{}\"\n",
                 escaped_old_val
             );
-            
+
             if let Err(e) = system.write_backup_file(&backup_path, &reg_content) {
-                error!("Failed to write backup content: {}", e);
+                return Err(anyhow::anyhow!("Failed to write backup content: {}", e));
             } else {
-                 info!("Backed up old PATH to {:?}", backup_path);
+                info!("Backed up old PATH to {:?}", backup_path);
             }
         }
     }
 
     // 3. Set new PATH
     system.write_user_path_registry(new_val)?;
-    
+
     // 4. Broadcast change (Twice with delay, to ensure standard apps pick it up)
     let _ = system.broadcast_environment_change();
     if !cfg!(test) {
-         // Sleep in prod, but not in tests if we can help it (unless mocking threaded sleep?)
-         // For now, simple standard sleep.
-         std::thread::sleep(std::time::Duration::from_secs(1));
+        // Sleep in prod, but not in tests if we can help it (unless mocking threaded sleep?)
+        // For now, simple standard sleep.
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
     let _ = system.broadcast_environment_change();
 
     // 5. Verify consistency
     if !system.verify_environment_health() {
         error!("Verification failed! The new PATH seems broken. Rolling back...");
-        
+
         // ROLLBACK
-        if let Err(e) = system.write_user_path_registry(&old_val) {
+        if let Err(e) = system.restore_user_path_registry(&old_val) {
             error!("CRITICAL: Failed to write back old PATH: {}", e);
             bail!("Verification failed AND Rollback failed. Please restore from backup manually.");
         }
         let _ = system.broadcast_environment_change();
         bail!("Verification failed. Rolled back to previous PATH.");
     }
-    
+
     Ok(())
 }
 
@@ -460,8 +610,47 @@ fn apply_path(system: &impl SystemOps, new_val: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
     use crate::invariant_ppt::clear_invariant_log;
+    use crate::system::{MockCall, MockOperation, MockSystem};
+    use proptest::prelude::*;
+
+    /// Behavior snapshot: the pure extraction accepts synthetic state and leaves all SystemOps
+    /// boundaries untouched while preserving the pre-extraction path construction result.
+    #[test]
+    fn extracted_planner_preserves_output_without_external_system_interaction() {
+        let mut candidates = HashMap::new();
+        candidates.insert(
+            "alpha".to_string(),
+            vec![discovery::Candidate {
+                path: PathBuf::from(r"C:\Users\Example\Bin"),
+                _source: "snapshot".to_string(),
+            }],
+        );
+        candidates.insert(
+            "beta".to_string(),
+            vec![discovery::Candidate {
+                path: PathBuf::from(r"C:\Users\Example\Tools"),
+                _source: "snapshot".to_string(),
+            }],
+        );
+        candidates.insert(
+            "system".to_string(),
+            vec![discovery::Candidate {
+                path: PathBuf::from(r"C:\Windows\System32"),
+                _source: "snapshot".to_string(),
+            }],
+        );
+        let system = MockSystem::new();
+
+        let planned =
+            build_minimal_path_for_system_path(&candidates, r"C:\Shared;C:\Users\Example\Bin");
+
+        assert_eq!(planned, r"c:\users\example\tools");
+        assert!(
+            system.calls().is_empty(),
+            "pure planning must not touch SystemOps"
+        );
+    }
 
     proptest! {
         #[test]
@@ -485,10 +674,10 @@ mod tests {
             let result = build_minimal_path(&map);
 
             // Assertions (Invariants are checked internal to the function, but we verify properties here)
-            
+
             // 1. User PATH should NOT contain System32 (that's in System PATH now)
             // The result may be empty if all discovered paths are in System PATH
-            
+
             // 2. Must not contain duplicates (Naive check on string)
             if !result.is_empty() {
                 let parts: Vec<&str> = result.split(';').collect();
@@ -499,12 +688,12 @@ mod tests {
 
         #[test]
         fn test_run_healing_mocks(
-            cmd_names in prop::collection::vec("[a-z]{3,5}", 0..5),
+            cmd_names in prop::collection::vec("[a-z]{3,5}", 1..5),
             paths in prop::collection::vec("c:\\\\users\\\\[a-z]{3,8}\\\\[a-z]{3,8}", 0..5),
             start_reg in "c:\\\\users\\\\test\\\\path1;c:\\\\users\\\\test\\\\path2"
         ) {
             use crate::system::MockSystem;
-            
+
             // Setup Mock System with both User and System PATH
             let mut reg = HashMap::new();
             reg.insert("Path".to_string(), start_reg.clone());
@@ -513,27 +702,133 @@ mod tests {
                 registry: std::sync::Mutex::new(reg),
                 ..Default::default()
             };
-            
+
             // Setup Candidates - use user paths, not system paths
             let mut map = HashMap::new();
             for (i, cmd) in cmd_names.iter().enumerate() {
                  let p = if i < paths.len() { paths[i].clone() } else { r"C:\Users\test\bin".to_string() };
                  map.insert(cmd.clone(), vec![discovery::Candidate { path: PathBuf::from(p), _source: "test".to_string() }]);
             }
-            
+
             // Action
             // We force dry_run = false so it actually "writes" to the mock.
             let result = run_healing(&map, &system, false);
-            
+
             // Assertions
             prop_assert!(result.is_ok(), "Healing failed: {:?}", result.err());
-            
+
             // Verify Mock Registry was updated (may be empty if all paths in system)
             let _new_reg = system.read_user_path_registry().unwrap();
-            
+
             // Verify broadcast
             let broadcast = *system.broadcast_called.lock().unwrap();
             prop_assert!(broadcast, "Broadcast missed");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 16,
+            failure_persistence: None,
+            .. ProptestConfig::default()
+        })]
+
+        /// **Validates: Requirements 1.1, 2.1**
+        #[test]
+        fn fail_closed_unreadable_user_path_blocks_mutation(
+            proposed_leaf in "[a-z]{1,8}"
+        ) {
+            let system = MockSystem::new();
+            system.fail_next(MockOperation::ReadUserPath);
+
+            let result = apply_path(&system, &format!(r"C:\\Tools\\{proposed_leaf}"));
+            let calls = system.calls();
+
+            prop_assert!(result.is_err(), "an unreadable User PATH must be surfaced as a User failure");
+            prop_assert!(
+                !calls.iter().any(|call| matches!(
+                    call,
+                    MockCall::WriteUserPath(_)
+                        | MockCall::BroadcastEnvironmentChange
+                        | MockCall::StagePosixCache { .. }
+                        | MockCall::CommitPosixCache { .. }
+                )),
+                "blocking an unreadable User PATH must precede User, cache, and broadcast writes; calls: {calls:?}"
+            );
+        }
+
+        /// **Validates: Requirements 1.1, 2.1**
+        #[test]
+        fn fail_closed_empty_discovery_plan_blocks_mutation(
+            old_leaf in "[a-z]{1,8}"
+        ) {
+            let system = MockSystem::with_registry("Path", &format!(r"C:\\Existing\\{old_leaf}"));
+
+            let result = apply_path(&system, "");
+            let calls = system.calls();
+
+            prop_assert!(result.is_err(), "an empty or untrustworthy discovery plan must not be committed");
+            prop_assert!(
+                !calls.iter().any(|call| matches!(
+                    call,
+                    MockCall::WriteUserPath(_)
+                        | MockCall::BroadcastEnvironmentChange
+                        | MockCall::StagePosixCache { .. }
+                        | MockCall::CommitPosixCache { .. }
+                )),
+                "blocking an empty discovery plan must precede User, cache, and broadcast writes; calls: {calls:?}"
+            );
+        }
+
+        /// **Validates: Requirements 1.2, 2.2**
+        #[test]
+        fn fail_closed_backup_failure_blocks_mutation(
+            proposed_leaf in "[a-z]{1,8}"
+        ) {
+            let system = MockSystem::with_registry("Path", r"C:\\Existing\\Tool");
+            system.fail_next(MockOperation::WriteBackup);
+
+            let result = apply_path(&system, &format!(r"C:\\Proposed\\{proposed_leaf}"));
+            let calls = system.calls();
+
+            prop_assert!(result.is_err(), "a backup failure must be returned as a User failure");
+            prop_assert!(
+                !calls.iter().any(|call| matches!(
+                    call,
+                    MockCall::WriteUserPath(_)
+                        | MockCall::BroadcastEnvironmentChange
+                        | MockCall::StagePosixCache { .. }
+                        | MockCall::CommitPosixCache { .. }
+                )),
+                "backup failure must precede User, cache, and broadcast writes; calls: {calls:?}"
+            );
+        }
+
+        /// **Validates: Requirements 1.4, 2.4**
+        #[test]
+        fn fail_closed_system_scope_failure_is_not_reported_as_success(
+            user_leaf in "[a-z]{1,8}"
+        ) {
+            let system = MockSystem::with_registry("Path", &format!(r"C:\\Users\\Example\\{user_leaf}"));
+            system.fail_next(MockOperation::ReadSystemPath);
+            let candidates = HashMap::<String, Vec<discovery::Candidate>>::new();
+
+            let result = heal_path_with_system(&candidates, &system, true);
+            let calls = system.calls();
+
+            prop_assert!(result.is_err(), "a System-scope failure must be surfaced instead of returning success");
+            let error = result.unwrap_err().to_string();
+            prop_assert!(error.contains("System"), "the surfaced failure must identify the System scope: {error}");
+            prop_assert!(
+                !calls.iter().any(|call| matches!(
+                    call,
+                    MockCall::WriteUserPath(_)
+                        | MockCall::BroadcastEnvironmentChange
+                        | MockCall::StagePosixCache { .. }
+                        | MockCall::CommitPosixCache { .. }
+                )),
+                "a blocking System failure must precede User, cache, and broadcast writes; calls: {calls:?}"
+            );
         }
     }
 }

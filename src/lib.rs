@@ -1,5 +1,14 @@
+pub mod backup;
+pub mod baseline;
+pub mod backup_lock;
 pub mod cleaner;
 pub mod discovery;
 pub mod elevation;
 pub mod invariant_ppt;
+pub mod logging;
+pub mod snapshot;
+pub mod store;
+pub mod subsystem;
+pub mod uninstall;
+pub mod yank_guard;
 pub mod system;
