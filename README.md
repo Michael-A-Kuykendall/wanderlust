@@ -88,25 +88,87 @@ wanderlust uninstall
 ### The Healing Cycle
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Discovery      │────▶│   Optimization   │────▶│   Application   │
-│  (Scanners)     │     │   (Builder)      │     │   (Registry)    │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-       │                        │                        │
-       ▼                        ▼                        ▼
- 1. Registry Scan         4. Normalize Paths       7. Backup .reg
-    (HKCU + HKLM)            (Lowercase/Trim)         (%LOCALAPPDATA%)
- 2. Common Locations      5. Deduplicate           8. Write HKCU PATH
-    (.cargo, .local)         (Preserve Order)      9. Broadcast Change
- 3. Existing PATH         6. Prioritize System        (WM_SETTINGCHANGE)
-                             (System32 First)
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         DISCOVERY PHASE                                 │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
+│  │ Registry     │  │ Common       │  │ Existing     │  │ Uninstall  │ │
+│  │ Scan (HKLM   │  │ Locations    │  │ PATH Ingestion│  │ Orphan     │ │
+│  │  + HKCU)     │  │(.cargo,scoop)│  │              │  │ Detection  │ │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └─────┬──────┘ │
+│         └─────────────────┴─────────────────┴─────────────────┘        │
+│                                 │                                      │
+│                                 ▼                                      │
+│                      ┌──────────────────┐                              │
+│                      │   Candidate Map   │                             │
+│                      │  cmd → [dirs]     │                             │
+│                      └────────┬─────────┘                              │
+└───────────────────────────────┼────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       OPTIMIZATION PHASE                                │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
+│  │ Baseline     │  │ Yank Guard   │  │ Subsystem    │  │ Snapshot   │ │
+│  │ Anomaly      │  │ Grace Period │  │ Safety       │  │ Drift      │ │
+│  │ Detection    │  │ (removable   │  │ (WSL/Cygwin/ │  │ Detection  │ │
+│  │              │  │  drive guard)│  │  MSYS2)      │  │            │ │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └─────┬──────┘ │
+│         └─────────────────┴─────────────────┴─────────────────┘        │
+│                                 │                                      │
+│                                 ▼                                      │
+│                      ┌──────────────────┐                              │
+│                      │   Minimal PATH    │                             │
+│                      │  (deduped,sorted) │                             │
+│                      └────────┬─────────┘                              │
+└───────────────────────────────┼────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       APPLICATION PHASE                                 │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
+│  │ Backup Lock  │  │ Backup .reg  │  │ Write HKCU   │  │ Broadcast  │ │
+│  │ (Mutex)      │  │ + SHA-256    │  │ PATH         │  │ WM_SETTING-│ │
+│  │              │  │ Checksum     │  │              │  │ CHANGE     │ │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └─────┬──────┘ │
+│         └─────────────────┴─────────────────┴─────────────────┘        │
+│                                 │                                      │
+│                                 ▼                                      │
+│                      ┌──────────────────┐                              │
+│                      │  Verification    │                              │
+│                      │  cmd + powershell│                              │
+│                      │  + whoami probes │                              │
+│                      └────────┬─────────┘                              │
+│                               │                                        │
+│                      ┌────────▼────────┐                               │
+│                      │  Pass?  │  Fail? │                              │
+│                      └────────┬─────────┘                              │
+│                          ✓    │    ✗                                   │
+│                          ▼    │    ▼                                   │
+│              ┌────────────┐   │  ┌────────────┐                        │
+│              │ Persist to │   │  │ Rollback   │                        │
+│              │ History    │   │  │ + Log      │                        │
+│              │ + Log      │   │  │ Failure    │                        │
+│              └────────────┘   │  └────────────┘                        │
+└───────────────────────────────┼────────────────────────────────────────┘
+                                │
+                                ▼
+                      ┌──────────────────┐
+                      │  POSIX Cache     │
+                      │  .wanderlust_    │
+                      │  posix generated │
+                      └──────────────────┘
 ```
 
 ### Safety Mechanisms
 
-1.  **Essential Anchoring**: Hardcoded preservation of `C:\Windows\System32`, `PowerShell`, and `OpenSSH` to prevent "bricking" the OS.
-2.  **Health Probes**: Post-write execution of `cmd /c ver` and `whoami`.
-3.  **Atomic-ish updates**: Backups are written to disk before Registry modification.
+1.  **Backup Lock**: File-based mutex prevents overlapping heal cycles from corrupting backups.
+2.  **SHA-256 Checksums**: Every backup includes a sidecar checksum; corruption is detected before restore.
+3.  **Grace Periods**: Missing entries (removable drives, network shares) get `YankGuard` grace cycles before removal.
+4.  **Subsystem Protection**: WSL, Cygwin, and MSYS2 PATH entries are never silently removed.
+5.  **Known-Good Snapshots**: After each successful heal, a snapshot is captured for drift detection.
+6.  **Health Probes**: Post-write execution of `cmd`, `powershell`, and `whoami` to verify the system is usable.
+7.  **Automatic Rollback**: If probes fail, the previous PATH is restored and the failure is logged.
+8.  **Cross-Session Memory**: `HistoryStore` persists outcomes across runs for failure-streak escalation.
 
 ### POSIX Integration
 
@@ -119,16 +181,29 @@ if [ -f ~/.wanderlust_posix ]; then
 fi
 ```
 
-## 📦 Source Code & Audit
+## 📦 Source Code
 
-Wanderlust is designed to be auditable. The full source code is available in this repository, but for a quick audit of the logic, see [WANDERLUST_SOURCE.md](WANDERLUST_SOURCE.md).
+Wanderlust is designed to be auditable. The full source is in this repository.
 
-### Components
+### Modules
 
-*   `src/cleaner.rs`: The core logic for healing, backup, and rollback.
-*   `src/discovery.rs`: The "Search Engine" that finds your installed tools (even if they aren't in PATH).
-*   `src/elevation.rs`: UAC token manipulation to ensure we can write to the Registry.
-*   `src/main.rs`: The CLI and Scheduler logic.
+| Module | Purpose |
+|--------|---------|
+| `src/cleaner.rs` | Core healing orchestration: discovery → optimization → application |
+| `src/discovery.rs` | Crawls registry, common locations, and existing PATH for tools |
+| `src/system.rs` | `SystemOps` trait + mock for isolated testing |
+| `src/elevation.rs` | UAC privilege check and admin relaunch |
+| `src/main.rs` | CLI entry point and scheduled-task install/uninstall |
+| `src/backup.rs` | SHA-256 checksummed backup files with rotation and partial restore |
+| `src/backup_lock.rs` | File-based mutex guarding backup writes |
+| `src/baseline.rs` | Learns normal PATH shape across samples for anomaly detection |
+| `src/invariant_ppt.rs` | Runtime invariant assertions for fail-closed safety |
+| `src/logging.rs` | JSON-lines structured logging with rotation |
+| `src/snapshot.rs` | Known-good PATH snapshots for drift detection |
+| `src/store.rs` | Cross-session heal history in JSON-lines format |
+| `src/subsystem.rs` | Protects WSL/Cygwin/MSYS2 PATH entries from removal |
+| `src/uninstall.rs` | Detects orphaned PATH entries after program removal |
+| `src/yank_guard.rs` | Grace-period tracking before removing missing entries |
 
 ## 📜 License
 
