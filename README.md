@@ -88,75 +88,14 @@ wanderlust uninstall
 ### The Healing Cycle
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         DISCOVERY PHASE                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
-│  │ Registry     │  │ Common       │  │ Existing     │  │ Uninstall  │ │
-│  │ Scan (HKLM   │  │ Locations    │  │ PATH Ingestion│  │ Orphan     │ │
-│  │  + HKCU)     │  │(.cargo,scoop)│  │              │  │ Detection  │ │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └─────┬──────┘ │
-│         └─────────────────┴─────────────────┴─────────────────┘        │
-│                                 │                                      │
-│                                 ▼                                      │
-│                      ┌──────────────────┐                              │
-│                      │   Candidate Map   │                             │
-│                      │  cmd → [dirs]     │                             │
-│                      └────────┬─────────┘                              │
-└───────────────────────────────┼────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                       OPTIMIZATION PHASE                                │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
-│  │ Baseline     │  │ Yank Guard   │  │ Subsystem    │  │ Snapshot   │ │
-│  │ Anomaly      │  │ Grace Period │  │ Safety       │  │ Drift      │ │
-│  │ Detection    │  │ (removable   │  │ (WSL/Cygwin/ │  │ Detection  │ │
-│  │              │  │  drive guard)│  │  MSYS2)      │  │            │ │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └─────┬──────┘ │
-│         └─────────────────┴─────────────────┴─────────────────┘        │
-│                                 │                                      │
-│                                 ▼                                      │
-│                      ┌──────────────────┐                              │
-│                      │   Minimal PATH    │                             │
-│                      │  (deduped,sorted) │                             │
-│                      └────────┬─────────┘                              │
-└───────────────────────────────┼────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                       APPLICATION PHASE                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
-│  │ Backup Lock  │  │ Backup .reg  │  │ Write HKCU   │  │ Broadcast  │ │
-│  │ (Mutex)      │  │ + SHA-256    │  │ PATH         │  │ WM_SETTING-│ │
-│  │              │  │ Checksum     │  │              │  │ CHANGE     │ │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └─────┬──────┘ │
-│         └─────────────────┴─────────────────┴─────────────────┘        │
-│                                 │                                      │
-│                                 ▼                                      │
-│                      ┌──────────────────┐                              │
-│                      │  Verification    │                              │
-│                      │  cmd + powershell│                              │
-│                      │  + whoami probes │                              │
-│                      └────────┬─────────┘                              │
-│                               │                                        │
-│                      ┌────────▼────────┐                               │
-│                      │  Pass?  │  Fail? │                              │
-│                      └────────┬─────────┘                              │
-│                          ✓    │    ✗                                   │
-│                          ▼    │    ▼                                   │
-│              ┌────────────┐   │  ┌────────────┐                        │
-│              │ Persist to │   │  │ Rollback   │                        │
-│              │ History    │   │  │ + Log      │                        │
-│              │ + Log      │   │  │ Failure    │                        │
-│              └────────────┘   │  └────────────┘                        │
-└───────────────────────────────┼────────────────────────────────────────┘
-                                │
-                                ▼
-                      ┌──────────────────┐
-                      │  POSIX Cache     │
-                      │  .wanderlust_    │
-                      │  posix generated │
-                      └──────────────────┘
+Discovery ──► Optimization ──► Application ──► Verification
+   │                │                │                │
+   ├─ Registry      ├─ Baseline      ├─ Backup Lock   ├─ cmd probes
+   ├─ Common paths  ├─ Yank Guard    ├─ SHA-256 .reg  ├─ rollback on fail
+   ├─ Existing PATH ├─ Subsystem     ├─ Write HKCU    └─ persist outcome
+   └─ Uninstall     ├─ Drift check   └─ Broadcast
+      orphans       └─ Build minimal
+                        PATH
 ```
 
 ### Safety Mechanisms
