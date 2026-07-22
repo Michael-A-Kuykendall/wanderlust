@@ -1,9 +1,4 @@
-//! # Cross-Session Persistence
-//!
-//! Wanderlust previously had no memory between healing cycles. [`HistoryStore`]
-//! persists a JSON-lines record of every heal cycle to
-//! `%LOCALAPPDATA%\wanderlust\history.jsonl`, allowing later features (failure
-//! escalation, baselining, drift detection) to reason across runs.
+//! Cross-session heal history in JSON-lines format.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -137,6 +132,7 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
     use crate::system::TestTempDir;
+    use proptest::prelude::*;
 
     #[test]
     fn append_then_load_roundtrips() {
@@ -183,5 +179,70 @@ mod tests {
         store.append(&HealingRecord::now(HealOutcome::RolledBack, 0, 0, "s")).unwrap();
         store.append(&HealingRecord::now(HealOutcome::Applied, 0, 0, "s")).unwrap();
         assert_eq!(store.recent_failures(Duration::from_secs(60)).unwrap(), 1);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 16,
+            failure_persistence: None,
+            .. ProptestConfig::default()
+        })]
+
+        #[test]
+        fn record_roundtrip(
+            outcome in prop::sample::select(vec![HealOutcome::Applied, HealOutcome::DryRun, HealOutcome::RolledBack, HealOutcome::NoOp]),
+            removed in 0usize..100,
+            added in 0usize..100,
+            ref source in "[a-z]{1,10}",
+        ) {
+            let dir = TestTempDir::new("store-prop").unwrap();
+            let store = HistoryStore::new(&dir.child("history.jsonl"));
+            let rec = HealingRecord::now(outcome, removed, added, source);
+            store.append(&rec).unwrap();
+            let loaded = store.load().unwrap();
+            prop_assert_eq!(loaded.len(), 1, "must load exactly 1 record");
+            prop_assert_eq!(loaded[0].outcome, outcome);
+            prop_assert_eq!(loaded[0].removed, removed);
+            prop_assert_eq!(loaded[0].added, added);
+            prop_assert_eq!(loaded[0].source.clone(), source.clone());
+        }
+
+        #[test]
+        fn failure_streak_never_exceeds_total(
+            outcomes in prop::collection::vec(
+                prop::sample::select(vec![HealOutcome::Applied, HealOutcome::RolledBack, HealOutcome::NoOp]),
+                0..20,
+            ),
+        ) {
+            let dir = TestTempDir::new("store-streak-prop").unwrap();
+            let store = HistoryStore::new(&dir.child("history.jsonl"));
+            for o in &outcomes {
+                store.append(&HealingRecord::now(*o, 0, 0, "t")).unwrap();
+            }
+            let streak = store.failure_streak().unwrap();
+            prop_assert!(streak <= outcomes.len(), "streak {} exceeds total {}", streak, outcomes.len());
+
+            // Verify streak matches trailing RolledBacks
+            let trailing = outcomes.iter().rev().take_while(|o| **o == HealOutcome::RolledBack).count();
+            prop_assert_eq!(streak, trailing, "streak must equal number of trailing RolledBacks");
+        }
+
+        #[test]
+        fn recent_failures_is_bounded_by_total(
+            outcomes in prop::collection::vec(
+                prop::sample::select(vec![HealOutcome::Applied, HealOutcome::RolledBack]),
+                0..20,
+            ),
+        ) {
+            let dir = TestTempDir::new("store-recent-prop").unwrap();
+            let store = HistoryStore::new(&dir.child("history.jsonl"));
+            for o in &outcomes {
+                store.append(&HealingRecord::now(*o, 0, 0, "t")).unwrap();
+            }
+            // Use a large window to count all RolledBacks
+            let recent = store.recent_failures(Duration::from_secs(u64::MAX)).unwrap();
+            let total_rolled = outcomes.iter().filter(|o| **o == HealOutcome::RolledBack).count();
+            prop_assert_eq!(recent, total_rolled, "recent_failures with huge window must equal all RolledBacks");
+        }
     }
 }

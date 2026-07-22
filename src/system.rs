@@ -28,30 +28,13 @@ pub trait SystemOps {
     /// Run system verification probes (cmd, powershell) to ensure PATH is valid.
     fn verify_environment_health(&self) -> bool;
 
-    /// Verify a planned effective PATH. The default keeps the existing ambient verification behavior
-    /// until the transaction coordinator adopts explicit proposed-PATH verification.
+    /// Verify a planned effective PATH.
     fn verify_effective_path(&self, _effective_path: &str) -> Result<()> {
         if self.verify_environment_health() {
             Ok(())
         } else {
             Err(anyhow::anyhow!("environment health verification failed"))
         }
-    }
-
-    /// Stage generated POSIX cache content for a later commit. Existing callers do not use this
-    /// seam yet, so the default intentionally preserves current production behavior.
-    fn stage_posix_cache(&self, _staged_path: &Path, _content: &str) -> Result<()> {
-        Ok(())
-    }
-
-    /// Atomically commit a previously staged POSIX cache. Existing callers do not use this seam yet.
-    fn commit_posix_cache(&self, _staged_path: &Path, _cache_path: &Path) -> Result<()> {
-        Ok(())
-    }
-
-    /// Restore the POSIX cache after a failed transaction. Existing callers do not use this seam yet.
-    fn restore_posix_cache(&self, _cache_path: &Path) -> Result<()> {
-        Ok(())
     }
 
     /// Read the System PATH from the Registry (Machine scope - HKLM).
@@ -154,9 +137,6 @@ pub enum MockOperation {
     WriteBackup,
     VerifyEnvironment,
     VerifyEffectivePath,
-    StagePosixCache,
-    CommitPosixCache,
-    RestorePosixCache,
     ReadSystemPath,
     WriteSystemPath,
 }
@@ -175,15 +155,6 @@ pub enum MockCall {
     },
     VerifyEnvironment,
     VerifyEffectivePath(String),
-    StagePosixCache {
-        path: std::path::PathBuf,
-        content: String,
-    },
-    CommitPosixCache {
-        staged_path: std::path::PathBuf,
-        cache_path: std::path::PathBuf,
-    },
-    RestorePosixCache(std::path::PathBuf),
     ReadSystemPath,
     WriteSystemPath(String),
 }
@@ -347,27 +318,6 @@ impl SystemOps for MockSystem {
         self.fail_if_configured(MockOperation::VerifyEffectivePath)
     }
 
-    fn stage_posix_cache(&self, staged_path: &Path, content: &str) -> Result<()> {
-        self.record(MockCall::StagePosixCache {
-            path: staged_path.to_path_buf(),
-            content: content.to_string(),
-        });
-        self.fail_if_configured(MockOperation::StagePosixCache)
-    }
-
-    fn commit_posix_cache(&self, staged_path: &Path, cache_path: &Path) -> Result<()> {
-        self.record(MockCall::CommitPosixCache {
-            staged_path: staged_path.to_path_buf(),
-            cache_path: cache_path.to_path_buf(),
-        });
-        self.fail_if_configured(MockOperation::CommitPosixCache)
-    }
-
-    fn restore_posix_cache(&self, cache_path: &Path) -> Result<()> {
-        self.record(MockCall::RestorePosixCache(cache_path.to_path_buf()));
-        self.fail_if_configured(MockOperation::RestorePosixCache)
-    }
-
     fn read_system_path_registry(&self) -> Result<String> {
         self.record(MockCall::ReadSystemPath);
         self.fail_if_configured(MockOperation::ReadSystemPath)?;
@@ -451,36 +401,6 @@ mod tests {
                 MockCall::BroadcastEnvironmentChange,
                 MockCall::VerifyEffectivePath("C:\\system;C:\\new".to_string()),
                 MockCall::RestoreUserPath("C:\\old".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn mock_system_records_configurable_cache_lifecycle_failures() {
-        let system = MockSystem::new();
-        let temp_dir = TestTempDir::new("cache seam").unwrap();
-        let staged_path = temp_dir.child("cache.stage");
-        let cache_path = temp_dir.child("cache");
-        system.fail_next(MockOperation::StagePosixCache);
-        system.fail_next(MockOperation::RestorePosixCache);
-
-        assert!(system.stage_posix_cache(&staged_path, "planned").is_err());
-        system
-            .commit_posix_cache(&staged_path, &cache_path)
-            .unwrap();
-        assert!(system.restore_posix_cache(&cache_path).is_err());
-        assert_eq!(
-            system.calls(),
-            vec![
-                MockCall::StagePosixCache {
-                    path: staged_path.clone(),
-                    content: "planned".to_string()
-                },
-                MockCall::CommitPosixCache {
-                    staged_path,
-                    cache_path: cache_path.clone()
-                },
-                MockCall::RestorePosixCache(cache_path),
             ]
         );
     }

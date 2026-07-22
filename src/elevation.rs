@@ -1,14 +1,4 @@
-//! # Elevation Module
-//!
-//! Handles User Account Control (UAC) privileges on Windows.
-//! Wanderlust modifies the Registry, which for the system PATH (HKLM) would require admin,
-//! but since we target `HKCU` (Current User), these checks are technically optional for minimal usage.
-//!
-//! However, in some corporate environments, even HKCU might be locked down or policies might interfere.
-//! This module provides the capability to check current privileges and request elevation if needed.
-//!
-//! **Note**: The current strategy prefers `HKCU`, so `heal` might *not* actually require Admin.
-//! But `discovery` of `C:\Program Files` is easier with read permissions (usually standard user is fine).
+//! UAC privilege check and admin relanch via ShellExecute "runas".
 
 use log::info;
 use std::ffi::CString;
@@ -17,13 +7,6 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::ShellExecuteA;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
 
-/// Checks if the current process has administrative privileges.
-///
-/// It opens the current process token and queries `TokenElevation`.
-///
-/// # Returns
-/// * `true` - If the process is running as Admin / High Integrity.
-/// * `false` - If running as Standard User.
 pub fn is_elevated() -> bool {
     let mut token = windows::Win32::Foundation::HANDLE::default();
     unsafe {
@@ -47,17 +30,6 @@ pub fn is_elevated() -> bool {
     false
 }
 
-/// Relaunches the current executable with administrative privileges using the "runas" verb.
-///
-/// This triggers the Windows UAC prompt.
-///
-/// # Returns
-/// * `true` - If the `ShellExecuteA` call succeeded (the new process was spawned).
-/// * `false` - If the user declined the prompt or the call failed.
-///
-/// # Safety
-/// This function uses `unsafe` Win32 calls. It constructs C-compatible strings from
-/// Rust strings and passes raw pointers to the Windows shell API.
 pub fn relaunch_as_admin() -> bool {
     if let Ok(exe_path) = std::env::current_exe() {
         // Safe conversion handling null bytes

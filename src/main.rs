@@ -1,10 +1,4 @@
-//! # Wanderlust: The Main Entry Point
-//!
-//! This module handles Command Line Interface (CLI) parsing, logging initialization,
-//! and dispatching commands to the appropriate sub-modules. It is the orchestrator
-//! of the Wanderlust application.
-//!
-//! The application is designed to be run as an Administrator (for `heal`, `install`, `uninstall`).
+//! CLI entry point: argument parsing, logging init, command dispatch.
 
 use clap::{Parser, Subcommand};
 use log::{LevelFilter, error, info, warn};

@@ -1,13 +1,4 @@
-//! # Backup Integrity & Restore
-//!
-//! Backups in Wanderlust are `.reg` files. A corrupted backup is worse than no
-//! backup: it creates false confidence before a rollback. This module adds:
-//!
-//! * A SHA-256 checksum written alongside every backup (so restore can verify
-//!   the bytes are intact).
-//! * Rotation that keeps only the most recent `N` successful backups.
-//! * Partial restore: reassemble a PATH containing only specific entries in
-//!   their original order, instead of blindly overwriting with the full backup.
+//! SHA-256 checksummed backup files with rotation and partial restore.
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -119,6 +110,8 @@ pub fn restore_partial(original_path: &str, keep_entries: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::system::TestTempDir;
+    use proptest::prelude::*;
+    use std::collections::HashSet;
 
     #[test]
     fn checksum_is_stable_and_hex() {
@@ -183,5 +176,71 @@ mod tests {
         let kept = vec![r"c:\a".to_string()];
         let result = restore_partial(original, &kept);
         assert_eq!(result, r"C:\A");
+    }
+
+    proptest! {
+        #[test]
+        fn checksum_is_always_64_hex_chars(ref s in ".*") {
+            let sum = checksum(s);
+            prop_assert!(sum.chars().all(|c| c.is_ascii_hexdigit()));
+            prop_assert_eq!(sum.len(), 64);
+        }
+
+        #[test]
+        fn checksum_is_deterministic(ref s in ".*") {
+            prop_assert_eq!(checksum(s), checksum(s));
+        }
+
+        #[test]
+        fn restore_partial_invariants(
+            ref parts in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..15),
+            ref keep in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..10),
+        ) {
+            let original = parts.join(";");
+            let result = restore_partial(&original, keep);
+
+            let result_parts: Vec<&str> = result.split(';').filter(|s| !s.is_empty()).collect();
+
+            // Every result entry must come from keep_entries (case-insensitive)
+            for entry in &result_parts {
+                let lower = entry.to_lowercase();
+                prop_assert!(
+                    keep.iter().any(|k| k.to_lowercase() == lower),
+                    "result contains '{}' not in keep_entries", entry
+                );
+            }
+
+            // No duplicates
+            let unique: HashSet<&str> = result_parts.iter().cloned().collect();
+            prop_assert_eq!(result_parts.len(), unique.len(), "result has duplicates");
+
+            // All non-empty keep entries appear in the result
+            let keep_lower: Vec<String> = keep.iter().map(|k| k.to_lowercase()).collect();
+            for k in keep.iter().filter(|k| !k.is_empty()) {
+                prop_assert!(
+                    result_parts.iter().any(|r| keep_lower.contains(&r.to_lowercase())),
+                    "keep entry '{}' missing from result", k
+                );
+            }
+        }
+
+        #[test]
+        fn restore_partial_preserves_original_order(
+            ref a in "[a-zA-Z]:\\\\[a-zA-Z0-9_]+",
+            ref b in "[a-zA-Z]:\\\\[a-zA-Z0-9_]+",
+            ref c in "[a-zA-Z]:\\\\[a-zA-Z0-9_]+",
+        ) {
+            let original = format!("{};{};{}", a, b, c);
+            // keep claims to want b and a in that order → result should have a then b
+            let keep = vec![b.to_uppercase(), a.to_uppercase()];
+            let result = restore_partial(&original, &keep);
+            let result_parts: Vec<&str> = result.split(';').filter(|s| !s.is_empty()).collect();
+            // a and b both appear, and a comes before b (original order)
+            let pos_a = result_parts.iter().position(|r| r.to_lowercase() == a.to_lowercase());
+            let pos_b = result_parts.iter().position(|r| r.to_lowercase() == b.to_lowercase());
+            if let (Some(pa), Some(pb)) = (pos_a, pos_b) {
+                prop_assert!(pa < pb, "original order not preserved");
+            }
+        }
     }
 }

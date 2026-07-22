@@ -1,15 +1,4 @@
-//! # Uninstall Healing
-//!
-//! Wanderlust does not watch for software uninstall events. When a program is
-//! removed, its PATH entries remain orphaned until the next scheduled heal (up
-//! to 30 minutes later). This module detects, immediately after an uninstall,
-//! which PATH entries are now dead (they live under a removed program
-//! directory) so healing can react without waiting for the next cycle.
-//!
-//! Note: Windows broadcasts `WM_SETTINGCHANGE` after PATH changes (see
-//! [`crate::system::SystemOps::broadcast_environment_change`]); the live
-//! daemon can hook that message to trigger [`crate::cleaner::heal_path`] right
-//! away. This module provides the *decision* logic for what to clean.
+//! Detects orphaned PATH entries after program uninstall.
 
 /// Returns the PATH entries (from `current_path`) that live under any of the
 /// `removed_dirs` program locations. Such entries are orphaned by an uninstall
@@ -54,6 +43,8 @@ fn normalize(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use std::collections::HashSet;
 
     #[test]
     fn detects_entries_under_removed_dir() {
@@ -92,5 +83,90 @@ mod tests {
         let stale = vec![r"C:\OLDAPP\BIN".to_string()];
         let pruned = prune_stale_entries(current, &stale);
         assert_eq!(pruned, r"C:\Keep");
+    }
+
+    proptest! {
+        #[test]
+        fn candidate_stale_entries_are_subset_of_path(
+            ref path_entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_\\\\]+", 0..10),
+            ref removed_dirs in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..5),
+        ) {
+            let current = path_entries.join(";");
+            let stale = candidate_stale_entries(&current, removed_dirs);
+
+            // All stale entries must be present in the current path
+            let path_set: Vec<String> = path_entries.iter().map(|e| normalize(e)).collect();
+            for s in &stale {
+                let ns = normalize(s);
+                prop_assert!(
+                    path_set.contains(&ns),
+                    "stale '{}' not in original path", s
+                );
+            }
+        }
+
+        #[test]
+        fn prune_removes_all_stale(
+            ref path_entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_\\\\]+", 0..10),
+            ref stale_entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_\\\\]+", 0..5),
+        ) {
+            let current = path_entries.join(";");
+            let pruned = prune_stale_entries(&current, stale_entries);
+            let stale_norm: HashSet<String> = stale_entries.iter().map(|s| normalize(s)).collect();
+            let pruned_parts: Vec<&str> = pruned.split(';').filter(|s| !s.is_empty()).collect();
+            // None of the pruned entries should contain a stale entry
+            for part in &pruned_parts {
+                let np = normalize(part);
+                prop_assert!(
+                    !stale_norm.contains(&np),
+                    "stale entry '{}' not removed by prune", part
+                );
+            }
+        }
+
+        #[test]
+        fn prune_preserves_non_stale_order(
+            ref survivors in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..8),
+            ref victims in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..5),
+        ) {
+            // Interleave survivors and victims to test order preservation
+            let mut current_parts: Vec<String> = Vec::new();
+            for (i, s) in survivors.iter().enumerate() {
+                if i < victims.len() {
+                    current_parts.push(victims[i].clone());
+                }
+                current_parts.push(s.clone());
+            }
+            let current = current_parts.join(";");
+            let pruned = prune_stale_entries(&current, victims);
+            let pruned_parts: Vec<&str> = pruned.split(';').filter(|s| !s.is_empty()).collect();
+
+            // All survivors must appear in pruned result, in original order
+            let survivor_lower: Vec<String> = survivors.iter().map(|s| normalize(s)).collect();
+            let mut pruned_iter = pruned_parts.iter();
+            for expected in &survivor_lower {
+                // Skip any pruned entries that aren't in the survivor list (they may be victims or empty)
+                let found = pruned_iter.by_ref().find(|p| normalize(p) == *expected);
+                prop_assert!(
+                    found.is_some(),
+                    "survivor '{}' not found in pruned result or order violated", expected
+                );
+            }
+        }
+
+        #[test]
+        fn candidate_and_prune_are_idempotent(
+            ref path_entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..8),
+            ref removed_dirs in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..4),
+        ) {
+            let current = path_entries.join(";");
+            let stale = candidate_stale_entries(&current, removed_dirs);
+            let pruned_once = prune_stale_entries(&current, &stale);
+            let pruned_twice = prune_stale_entries(&pruned_once, &stale);
+            prop_assert_eq!(
+                pruned_once, pruned_twice,
+                "prune must be idempotent: call twice same result"
+            );
+        }
     }
 }

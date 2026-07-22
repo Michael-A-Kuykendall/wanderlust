@@ -1,12 +1,4 @@
-//! # Cleaner Logic
-//!
-//! This module contains the core business logic for Wanderlust. It is responsible for:
-//! 1. Orchestrating the discovery of tools (`heal_path`).
-//! 2. Constructing the optimal PATH string (`build_minimal_path`).
-//! 3. Safely applying changes to the Windows Registry (`apply_path`).
-//! 4. Verifying system stability and rolling back if necessary.
-//!
-//! It also handles the generation of POSIX-compatible cache files for Git Bash / MSYS2 integration.
+//! Core healing orchestration: discovery, PATH construction, registry writes, verification.
 
 use crate::discovery;
 use crate::invariant_ppt::*;
@@ -139,8 +131,7 @@ pub fn run_healing(
     system: &impl SystemOps,
     dry_run: bool,
 ) -> Result<()> {
-    // Get current User PATH for comparison
-    let current_user_path = system.read_user_path_registry().unwrap_or_default();
+    let current_user_path = system.read_user_path_registry()?;
     let current_entries: HashSet<String> = current_user_path
         .split(';')
         .filter(|s| !s.is_empty())
@@ -251,25 +242,18 @@ pub fn run_healing(
         return Ok(());
     }
 
-    // Generate and write POSIX path for Git Bash / MSYS integration
-    // This file contains the COMPLETE PATH (System + User) in POSIX format
     if let Some(user_dirs) = directories::UserDirs::new() {
-        // Get System PATH and convert to POSIX
         let system_path = system.read_system_path_registry().unwrap_or_default();
         let system_posix: Vec<String> = system_path
             .split(';')
             .filter(|s| !s.is_empty())
             .map(win_to_posix)
             .collect();
-
-        // Convert User PATH to POSIX
         let user_posix: Vec<String> = new_path_string
             .split(';')
             .filter(|s| !s.is_empty())
             .map(win_to_posix)
             .collect();
-
-        // Combine: System first, then User (matches Windows behavior)
         let full_posix = [system_posix, user_posix].concat().join(":");
 
         let posix_file = user_dirs.home_dir().join(".wanderlust_posix");
@@ -287,10 +271,6 @@ pub fn run_healing(
     apply_path(system, &new_path_string)?;
     info!("Successfully healed PATH!");
 
-    // Persist a cross-session record and emit a structured log line so later
-    // runs (failure escalation, baselining, drift detection) can reason across
-    // heal cycles. The write itself is gated to production so unit tests stay
-    // hermetic and fast.
     if let Some(_dir) = app_data_dir() {
         #[cfg(not(test))]
         persist_heal_outcome(&_dir, removing.len(), adding.len());
@@ -409,13 +389,6 @@ pub fn doctor() -> Result<()> {
     Ok(())
 }
 
-/// Constructs a minimal USER PATH string from discovered candidates.
-///
-/// **The Immutable Logic:**
-/// 1.  **System PATH exclusion**: Don't duplicate anything already in HKLM System PATH.
-/// 2.  **Deduplication**: We normalize paths (lowercase) to ensure `C:\Win` and `c:\win` don't duplicate.
-/// 3.  **Discovery**: We append all discovered directories that contain executables.
-/// 4.  **No Windows paths**: System32, Windows, etc. belong in System PATH, not User PATH.
 fn build_minimal_path(map: &HashMap<String, Vec<discovery::Candidate>>) -> String {
     // Read System PATH to avoid duplicating entries.
     let system = WindowsSystem;
@@ -768,10 +741,8 @@ mod tests {
                     call,
                     MockCall::WriteUserPath(_)
                         | MockCall::BroadcastEnvironmentChange
-                        | MockCall::StagePosixCache { .. }
-                        | MockCall::CommitPosixCache { .. }
                 )),
-                "blocking an unreadable User PATH must precede User, cache, and broadcast writes; calls: {calls:?}"
+                "blocking an unreadable User PATH must precede User and broadcast writes; calls: {calls:?}"
             );
         }
 
@@ -791,8 +762,7 @@ mod tests {
                     call,
                     MockCall::WriteUserPath(_)
                         | MockCall::BroadcastEnvironmentChange
-                        | MockCall::StagePosixCache { .. }
-                        | MockCall::CommitPosixCache { .. }
+                        
                 )),
                 "blocking an empty discovery plan must precede User, cache, and broadcast writes; calls: {calls:?}"
             );
@@ -815,8 +785,7 @@ mod tests {
                     call,
                     MockCall::WriteUserPath(_)
                         | MockCall::BroadcastEnvironmentChange
-                        | MockCall::StagePosixCache { .. }
-                        | MockCall::CommitPosixCache { .. }
+                        
                 )),
                 "backup failure must precede User, cache, and broadcast writes; calls: {calls:?}"
             );
@@ -842,8 +811,7 @@ mod tests {
                     call,
                     MockCall::WriteUserPath(_)
                         | MockCall::BroadcastEnvironmentChange
-                        | MockCall::StagePosixCache { .. }
-                        | MockCall::CommitPosixCache { .. }
+                        
                 )),
                 "a blocking System failure must precede User, cache, and broadcast writes; calls: {calls:?}"
             );

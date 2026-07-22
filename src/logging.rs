@@ -1,10 +1,4 @@
-//! # Structured Logging
-//!
-//! Wanderlust previously logged only via `eprintln!`/`debug!`. This module adds
-//! structured, machine-parseable logging: each event is one JSON line written to
-//! `%LOCALAPPDATA%\wanderlust\logs\wanderlust.log`. This enables post-hoc
-//! analysis of heal cycles, rollbacks, and subsystem interactions without
-//! scraping free-form text.
+//! JSON-lines structured logging with rotation.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -118,6 +112,7 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
     use crate::system::TestTempDir;
+    use proptest::prelude::*;
     use std::io::Read;
 
     #[test]
@@ -172,5 +167,70 @@ mod tests {
 
         // app.3.log should not exist (keep=3 means .1, .2, .3; but we only had .1,.2 + current)
         assert!(!dir.child("app.4.log").exists());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 16,
+            failure_persistence: None,
+            .. ProptestConfig::default()
+        })]
+
+        #[test]
+        fn log_event_json_roundtrip(
+            level in prop::sample::select(vec![Level::Trace, Level::Info, Level::Warn, Level::Error]),
+            ref component in "[a-z]{1,20}",
+            ref message in "[a-zA-Z0-9 _./-]{0,100}",
+            ref field_key in "[a-z]{1,10}",
+            field_val in 0i64..1000,
+        ) {
+            let ev = LogEvent::new(level, component.clone(), message.clone())
+                .with_fields(serde_json::json!({field_key: field_val}));
+            let json = serde_json::to_string(&ev).unwrap();
+            let parsed: LogEvent = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(parsed.level, level);
+            prop_assert_eq!(parsed.component, component.clone());
+            prop_assert_eq!(parsed.message.as_deref(), if message.is_empty() { Some("") } else { Some(message.as_str()) });
+            prop_assert_eq!(parsed.fields[field_key].clone(), field_val);
+        }
+
+        #[test]
+        fn append_and_read_roundtrip(
+            level in prop::sample::select(vec![Level::Trace, Level::Info, Level::Warn, Level::Error]),
+            ref component in "[a-z]{1,20}",
+            ref message in "[a-zA-Z0-9 _./-]{0,100}",
+        ) {
+            let dir = TestTempDir::new("logging-prop").unwrap();
+            let log = dir.child("test.log");
+            let ev = LogEvent::new(level, component.clone(), message.clone());
+            append_event(&log, &ev).unwrap();
+
+            let mut content = String::new();
+            std::fs::File::open(&log).unwrap().read_to_string(&mut content).unwrap();
+            let parsed: LogEvent = serde_json::from_str(content.trim()).unwrap();
+            prop_assert_eq!(parsed.level, level);
+            prop_assert_eq!(parsed.component, component.clone());
+        }
+
+        #[test]
+        fn rotate_preserves_content(
+            ref content in "[a-zA-Z0-9 \n]{1,50}",
+            keep in 1usize..5,
+        ) {
+            let dir = TestTempDir::new("logging-rotate-prop").unwrap();
+            let log = dir.child("app.log");
+            std::fs::write(&log, content).unwrap();
+
+            rotate(&log, keep).unwrap();
+
+            // The original content should be in app.1.log
+            let rotated_path = dir.child("app.1.log");
+            prop_assert!(rotated_path.exists(), "rotated file app.1.log must exist");
+            let rotated_content = std::fs::read_to_string(&rotated_path).unwrap();
+            prop_assert_eq!(rotated_content, content.as_str(), "rotated file must preserve content");
+
+            // The original log file no longer exists
+            prop_assert!(!log.exists(), "original log must no longer exist after rotation");
+        }
     }
 }

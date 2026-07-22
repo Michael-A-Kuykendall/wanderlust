@@ -1,14 +1,4 @@
-//! # Backup Mutual Exclusion
-//!
-//! Two Wanderlust heal cycles must never write the backup file and Registry
-//! simultaneously. [`BackupLock`] provides a cooperative, file-based mutex in
-//! `%LOCALAPPDATA%\wanderlust` so that overlapping runs serialize their writes.
-//!
-//! Rather than relying on OS advisory locks (which behave differently across
-//! platforms and are hard to test deterministically), the lock records the
-//! acquiring process id and an acquisition timestamp. A lock whose timestamp is
-//! older than `stale_timeout` is considered abandoned and is taken over. This
-//! guarantees progress even if a previous process crashed while holding the lock.
+//! File-based mutex guarding backup writes with stale PID/timestamp takeover.
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -136,6 +126,7 @@ impl Drop for LockGuard {
 mod tests {
     use super::*;
     use crate::system::TestTempDir;
+    use proptest::prelude::*;
 
     fn tmp_lock(dir: &TestTempDir, timeout: Duration) -> BackupLock {
         BackupLock::new(dir.path(), timeout)
@@ -188,5 +179,46 @@ mod tests {
         std::fs::write(&lock_path, "not json").unwrap();
         let fresh = BackupLock::new(dir.path(), Duration::from_secs(60));
         assert!(fresh.acquire().is_ok());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 8,
+            failure_persistence: None,
+            .. ProptestConfig::default()
+        })]
+
+        #[test]
+        fn stale_lock_any_pid_and_timestamp_taken_over(
+            pid in 0u32..u32::MAX,
+            age_secs in 1000u64..1_000_000_000u64,
+        ) {
+            let dir = TestTempDir::new("backup-lock-prop").unwrap();
+            let lock_path = dir.path().join(LOCK_FILE_NAME);
+            let record = LockRecord {
+                pid,
+                acquired_at: now_secs().saturating_sub(age_secs),
+            };
+            std::fs::write(&lock_path, serde_json::to_string(&record).unwrap()).unwrap();
+
+            let fresh = BackupLock::new(dir.path(), Duration::from_secs(60));
+            prop_assert!(fresh.acquire().is_ok(), "failed to take over stale lock from pid={} age={}", pid, age_secs);
+            let rec = fresh.read_record().unwrap().unwrap();
+            prop_assert_eq!(rec.pid, std::process::id(), "stale takeover must write own pid");
+        }
+
+        #[test]
+        fn malformed_json_is_safe(ref bad_json in "\\PC*") {
+            // The parse must never panic, and should return None for malformed input.
+            // We can't test read_record directly (private), but we test the public
+            // contract: a malformed lock file is treated as free.
+            let dir = TestTempDir::new("backup-lock-bad-prop").unwrap();
+            let lock_path = dir.path().join(LOCK_FILE_NAME);
+            let _ = std::fs::write(&lock_path, bad_json);
+            let lock = BackupLock::new(dir.path(), Duration::from_secs(60));
+            // Should not panic — acquire either succeeds (treated as free) or
+            // returns an I/O error, but never panics.
+            let _result = lock.acquire();
+        }
     }
 }

@@ -1,16 +1,6 @@
-//! # Multi-System PATH Safety (WSL / Cygwin / MSYS2)
-//!
-//! WSL, Cygwin, and MSYS2 inherit the Windows `PATH` by default. When
-//! Wanderlust dedupes or removes a Windows PATH entry, that change is visible
-//! to those subsystems too, and can break their tools.
-//!
-//! [`SubsystemSafety`] identifies entries that belong to (or are referenced by)
-//! a POSIX subsystem and prevents Wanderlust from silently removing them. It can
-//! also probe a live WSL instance to learn which Windows paths WSL currently
-//! surfaces, so healing decisions can respect that dependency.
+//! Protects WSL/Cygwin/MSYS2 PATH entries from removal during healing.
 
 use std::collections::HashSet;
-use std::path::Path;
 
 /// Prefixes that mark a PATH entry as owned by / shared with a POSIX subsystem.
 const PROTECTED_PREFIXES: &[&str] = &[
@@ -154,12 +144,10 @@ pub fn probe_wsl_path() -> Option<HashSet<String>> {
     }
 }
 
-#[allow(dead_code)]
-fn _assert_path_trait(_p: &Path) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn protected_prefixes_are_preserved() {
@@ -209,5 +197,58 @@ mod tests {
         let parsed = parse_wsl_path_output(r"C:\Python39:D:\Apps");
         assert!(parsed.contains(r"c:\python39"));
         assert!(parsed.contains(r"d:\apps"));
+    }
+
+    proptest! {
+        #[test]
+        fn parse_wsl_path_output_never_panics(ref raw in "\\PC*") {
+            // Must never panic, regardless of input.
+            let result = parse_wsl_path_output(raw);
+            // All returned paths should look like valid Windows paths.
+            for path in &result {
+                let bytes = path.as_bytes();
+                // Basic shape: <letter>:\\...
+                prop_assert!(path.len() >= 3, "path '{}' too short", path);
+                prop_assert!(
+                    bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\',
+                    "extracted '{}' is not a valid Windows path", path
+                );
+            }
+        }
+
+        #[test]
+        fn should_preserve_is_deterministic(
+            ref entry in "\\PC{1,100}",
+            ref extra_prefix in "\\PC{0,20}",
+        ) {
+            let safety = if extra_prefix.is_empty() {
+                SubsystemSafety::new()
+            } else {
+                SubsystemSafety::new().with_prefix(extra_prefix.clone())
+            };
+            // Deterministic: same entry always same result
+            let v1 = safety.should_preserve(entry);
+            let v2 = safety.should_preserve(entry);
+            prop_assert_eq!(v1, v2, "should_preserve must be deterministic");
+        }
+
+        #[test]
+        fn removable_entries_is_subset(
+            ref entries in prop::collection::vec("\\PC{1,50}", 0..10),
+        ) {
+            let safety = SubsystemSafety::new();
+            let removable = safety.removable_entries(entries);
+            // Every removable entry must be in the original list
+            for r in &removable {
+                prop_assert!(
+                    entries.iter().any(|e| e == *r),
+                    "removable entry '{}' not in original", r
+                );
+            }
+            // Count: removable + preserved = total
+            let preserved: Vec<&String> = entries.iter().filter(|e| safety.should_preserve(e)).collect();
+            prop_assert_eq!(removable.len() + preserved.len(), entries.len(),
+                "removable + preserved must equal total entries");
+        }
     }
 }

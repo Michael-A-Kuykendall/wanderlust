@@ -1,10 +1,4 @@
-//! # Known-Good PATH Snapshots
-//!
-//! Healing decisions are currently based only on the live registry. This module
-//! adds a "source of truth": periodically we capture a snapshot of a verified
-//! healthy PATH (taken right after a successful heal + probe). Later cycles can
-//! diff against the last known-good snapshot to detect drift *before* it causes
-//! failures, and to roll back to it on probe failure.
+//! Known-good PATH snapshots for drift detection and rollback.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -137,6 +131,7 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
     use crate::system::TestTempDir;
+    use proptest::prelude::*;
 
     #[test]
     fn snapshot_from_path_splits_entries() {
@@ -175,5 +170,120 @@ mod tests {
         store.save(&PathSnapshot::from_path(r"C:\A;C:\B")).unwrap();
         let loaded = store.load().unwrap().unwrap();
         assert_eq!(loaded.entries, vec![r"C:\A".to_string(), r"C:\B".to_string()]);
+    }
+
+    proptest! {
+        #[test]
+        fn drift_score_is_always_bounded(
+            ref snap_entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..10),
+            ref live_entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..10),
+        ) {
+            let snap = PathSnapshot {
+                taken_at: 0,
+                entries: snap_entries.clone(),
+            };
+            let current = live_entries.join(";");
+            let diff = diff_snapshot(&snap, &current);
+            prop_assert!(diff.drift_score >= 0.0, "drift must be >= 0, got {}", diff.drift_score);
+            prop_assert!(diff.drift_score <= 1.0, "drift must be <= 1, got {}", diff.drift_score);
+        }
+
+        #[test]
+        fn self_diff_is_identity(
+            ref entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..10),
+        ) {
+            let snap = PathSnapshot {
+                taken_at: 0,
+                entries: entries.clone(),
+            };
+            let current = entries.join(";");
+            let diff = diff_snapshot(&snap, &current);
+            prop_assert!(diff.is_empty());
+            prop_assert_eq!(diff.drift_score, 0.0);
+        }
+
+        #[test]
+        fn empty_snapshot_has_zero_drift(
+            ref live_entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..10),
+        ) {
+            let snap = PathSnapshot {
+                taken_at: 0,
+                entries: vec![],
+            };
+            let current = live_entries.join(";");
+            let diff = diff_snapshot(&snap, &current);
+            prop_assert_eq!(diff.drift_score, 0.0, "empty snapshot: drift must be 0");
+            // All live entries appear in 'added'
+            for entry in live_entries {
+                let lower = entry.to_lowercase();
+                prop_assert!(
+                    diff.added.iter().any(|a| a.to_lowercase() == lower),
+                    "entry '{}' missing from added", entry
+                );
+            }
+        }
+
+        #[test]
+        fn removed_entries_are_subset_of_snapshot(
+            ref snap_entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 1..10),
+            ref live_entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..10),
+        ) {
+            let snap = PathSnapshot {
+                taken_at: 0,
+                entries: snap_entries.clone(),
+            };
+            let current = live_entries.join(";");
+            let diff = diff_snapshot(&snap, &current);
+            let snap_lower: Vec<String> = snap_entries.iter().map(|e| e.to_lowercase()).collect();
+            for r in &diff.removed {
+                prop_assert!(
+                    snap_lower.contains(&r.to_lowercase()),
+                    "removed '{}' not in snapshot", r
+                );
+            }
+        }
+
+        #[test]
+        fn added_entries_are_not_in_snapshot(
+            ref snap_entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..10),
+            ref live_entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..10),
+        ) {
+            let snap = PathSnapshot::from_path(&snap_entries.join(";"));
+            let current = live_entries.join(";");
+            let diff = diff_snapshot(&snap, &current);
+            let snap_set = snap.set();
+            for a in &diff.added {
+                prop_assert!(
+                    !snap_set.contains(&a.to_lowercase()),
+                    "added '{}' was already in snapshot", a
+                );
+            }
+        }
+
+        #[test]
+        fn drift_beyond_is_monotonic(
+            ref entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 1..8),
+            t1 in 0.0f64..1.0f64,
+            t2 in 0.0f64..1.0f64,
+        ) {
+            let snap = PathSnapshot::from_path(&entries.join(";"));
+            let current = entries[..entries.len() / 2].join(";");
+            let score = diff_snapshot(&snap, &current).drift_score;
+            // Threshold on either side of the actual drift score should be consistent
+            prop_assert_eq!(
+                is_drift_beyond(&snap, &current, score - 0.001),
+                score > score - 0.001,
+                "drift_beyond must use strict > comparison"
+            );
+            // Different entries same threshold shape
+            if t1 <= t2 {
+                let v1 = is_drift_beyond(&snap, &current, t1);
+                let v2 = is_drift_beyond(&snap, &current, t2);
+                prop_assert!(
+                    v1 || !v2,
+                    "if drift_beyond(t1) is false then drift_beyond(t2) must also be false for t2 >= t1"
+                );
+            }
+        }
     }
 }

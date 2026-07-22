@@ -1,13 +1,4 @@
-//! # YANK Detection Grace Period
-//!
-//! When a PATH entry's backing directory disappears (e.g. a removable drive,
-//! network share, or temporarily disconnected mount), Wanderlust must not
-//! immediately delete it. The entry may reappear on the next heal cycle.
-//!
-//! [`YankGuard`] tracks consecutive "missing" observations per entry and only
-//! classifies an entry for removal once it has been missing for `grace_cycles`
-//! consecutive healing cycles. This is the "suspicious" vs "confirmed dead"
-//! distinction that prevents false-positive removals.
+//! Grace-period tracking for missing PATH entries before removal.
 
 use std::collections::{HashMap, HashSet};
 
@@ -103,6 +94,7 @@ impl YankGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn set(items: &[&str]) -> HashSet<String> {
         items.iter().map(|s| s.to_lowercase()).collect()
@@ -167,5 +159,75 @@ mod tests {
         assert!(d.confirmed_dead.is_empty());
         assert!(d.suspicious.is_empty());
         assert_eq!(guard.suspicious_count(), 0);
+    }
+
+    proptest! {
+        #[test]
+        fn classify_partitions_entries(
+            ref entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 0..8),
+            grace_cycles in 0u32..5,
+            ref present_flags in prop::collection::vec(proptest::bool::ANY, 0..8),
+        ) {
+            let present_set: HashSet<String> = entries.iter()
+                .enumerate()
+                .filter(|(i, _)| present_flags.get(*i).copied().unwrap_or(false))
+                .map(|(_, e)| e.to_lowercase())
+                .collect();
+            let mut guard = YankGuard::new(grace_cycles);
+            let d = guard.classify(entries, &present_set);
+
+            // The three categories should be disjoint
+            let dead_set: HashSet<String> = d.confirmed_dead.iter().map(|e| e.to_lowercase()).collect();
+            let susp_set: HashSet<String> = d.suspicious.iter().map(|e| e.to_lowercase()).collect();
+            let healthy_set: HashSet<String> = d.healthy.iter().map(|e| e.to_lowercase()).collect();
+
+            let dead_susp_intersection: HashSet<&String> = dead_set.intersection(&susp_set).collect();
+            let dead_healthy_intersection: HashSet<&String> = dead_set.intersection(&healthy_set).collect();
+            let susp_healthy_intersection: HashSet<&String> = susp_set.intersection(&healthy_set).collect();
+            prop_assert!(dead_susp_intersection.is_empty(), "confirmed_dead and suspicious overlap");
+            prop_assert!(dead_healthy_intersection.is_empty(), "confirmed_dead and healthy overlap");
+            prop_assert!(susp_healthy_intersection.is_empty(), "suspicious and healthy overlap");
+        }
+
+        #[test]
+        fn classify_with_grace_zero_confirms_immediately(
+            ref entries in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+", 1..8),
+        ) {
+            let present_set = HashSet::new();
+            let mut guard = YankGuard::new(0);
+            let d = guard.classify(entries, &present_set);
+            prop_assert!(
+                d.suspicious.is_empty(),
+                "grace_cycles=0 must not produce suspicious entries"
+            );
+            // All entries should be confirmed dead
+            let entry_set: HashSet<String> = entries.iter().map(|e| e.to_lowercase()).collect();
+            let dead_set: HashSet<String> = d.confirmed_dead.iter().map(|e| e.to_lowercase()).collect();
+            prop_assert_eq!(
+                entry_set, dead_set,
+                "grace_cycles=0: all entries should be confirmed dead"
+            );
+        }
+
+        #[test]
+        fn healthy_entry_clears_miss_counter(
+            ref entry in "[a-zA-Z]:\\\\[a-zA-Z0-9_]+",
+            grace_cycles in 1u32..5,
+        ) {
+            let absent = HashSet::new();
+            let present = set(&[entry]);
+            let mut guard = YankGuard::new(grace_cycles);
+            // First pass: absent (builds up misses)
+            let _ = guard.classify(std::slice::from_ref(entry), &absent);
+            // Second pass: present (should reset)
+            let d2 = guard.classify(std::slice::from_ref(entry), &present);
+            prop_assert!(
+                d2.healthy.iter().any(|h| h.eq_ignore_ascii_case(entry)),
+                "healthy entry must appear in healthy vec"
+            );
+            prop_assert!(d2.confirmed_dead.is_empty(), "healthy entry must not be confirmed dead");
+            prop_assert!(d2.suspicious.is_empty(), "healthy entry must not be suspicious");
+            prop_assert_eq!(guard.suspicious_count(), 0, "suspicious_count must be 0 after healthy");
+        }
     }
 }

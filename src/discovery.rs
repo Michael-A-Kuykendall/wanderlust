@@ -1,18 +1,4 @@
-//! # Discovery Module
-//!
-//! This module is responsible for the "Heuristic Discovery" phase of Wanderlust.
-//! Instead of relying solely on what the user has manually added to their PATH,
-//! Wanderlust actively crawls the system to find tools that *should* be available.
-//!
-//! ## Discovery Strategies
-//!
-//! 1.  **Registry Scanning**: Checks `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall`
-//!     to find installation locations of software (e.g., VS Code, Node.js).
-//! 2.  **Common Locations**: Checks "Well Known" paths like `~/.cargo/bin`, `~/.local/bin`,
-//!     and Scoop shims.
-//! 3.  **Existing PATH**: Ingests the current PATH to ensure we don't lose any manual configurations.
-//!
-//! The result is a unified map of `Command Name -> List of Directories`.
+//! Crawls registry, common locations, and existing PATH to find tools.
 
 use log::debug;
 use std::collections::HashMap;
@@ -20,25 +6,15 @@ use std::path::PathBuf;
 use walkdir::WalkDir;
 use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
 
-/// Represents a potential location for a specific command.
 #[derive(Debug, Clone)]
 pub struct Candidate {
-    /// The directory containing the executable.
     pub path: PathBuf,
-    /// The origin of this discovery (e.g., "scoop", "registry", "cargo").
-    /// This is currently used for debugging but will drive ranking logic in v2.0.
+    #[doc(hidden)]
     pub _source: String,
 }
 
 use crate::invariant_ppt::assert_invariant;
 
-/// The main entry point for discovery.
-///
-/// Scans the system using multiple strategies and returns a map where:
-/// - **Key**: The executable name (lowercase, e.g., "node", "cargo").
-/// - **Value**: A list of directories where this executable was found.
-///
-/// Use this map to construct a new PATH or to detect conflicts (shadowing).
 pub fn discover_candidates() -> HashMap<String, Vec<Candidate>> {
     let mut map: HashMap<String, Vec<Candidate>> = HashMap::new();
 
@@ -70,10 +46,6 @@ pub fn discover_candidates() -> HashMap<String, Vec<Candidate>> {
     map
 }
 
-/// Scans the Windows Registry for installed applications.
-///
-/// Looks at `HKCU` and `HKLM` `Software\Microsoft\Windows\CurrentVersion\Uninstall` for `InstallLocation` keys.
-/// If a `bin` directory exists inside the install location, that is preferred.
 fn scan_registry_uninstall(map: &mut HashMap<String, Vec<Candidate>>) {
     let key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
 
@@ -108,12 +80,6 @@ fn scan_registry_uninstall(map: &mut HashMap<String, Vec<Candidate>>) {
     }
 }
 
-/// Scans "well-known" directories that developers commonly use.
-///
-/// Currently supports:
-/// - Cargo (`~/.cargo/bin`)
-/// - Local User Bin (`~/.local/bin`)
-/// - Scoop Shims (`~/scoop/shims`)
 fn scan_common_locations(map: &mut HashMap<String, Vec<Candidate>>) {
     if let Some(user_profile) = directories::UserDirs::new() {
         let home = user_profile.home_dir();
@@ -168,7 +134,11 @@ fn scan_common_locations(map: &mut HashMap<String, Vec<Candidate>>) {
         }
 
     // System-wide Python installations
-    for drive in ["C:", "D:"] {
+    let drives: Vec<String> = ('A'..='Z')
+        .map(|d| format!("{}:", d))
+        .filter(|d| std::path::Path::new(&format!("{}\\", d)).exists())
+        .collect();
+    for drive in drives {
         // Old-style: C:\Python3XX
         let drive_path = PathBuf::from(drive);
         if let Ok(entries) = std::fs::read_dir(&drive_path) {
@@ -209,10 +179,6 @@ fn scan_common_locations(map: &mut HashMap<String, Vec<Candidate>>) {
     }
 }
 
-/// Scans the current environment variable `PATH`.
-///
-/// This ensures that even if we don't heuristically find a tool,
-/// if the user had it in their PATH before, we preserve it.
 fn scan_existing_path(map: &mut HashMap<String, Vec<Candidate>>) {
     if let Ok(path_var) = std::env::var("PATH") {
         for part in path_var.split(';') {
@@ -227,10 +193,6 @@ fn scan_existing_path(map: &mut HashMap<String, Vec<Candidate>>) {
     }
 }
 
-/// Helper function to scan a specific directory for executables.
-///
-/// Adds any found `.exe`, `.cmd`, `.bat`, or `.com` files to the candidate map.
-/// This function is shallow (depth 1) generally, to avoid massive crawls.
 fn add_dir_candidates(map: &mut HashMap<String, Vec<Candidate>>, dir: &PathBuf, source: &str) {
     debug!("Scanning directory: {:?}", dir);
     // Only go 1 level deep

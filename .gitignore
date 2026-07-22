@@ -4,3 +4,5 @@
 **/*.reg
 *.log
 **/.DS_Store
+.kiro/
+chat.md

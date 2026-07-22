@@ -1,10 +1,4 @@
-//! # AUTO Mode Baselining
-//!
-//! Wanderlust currently applies the same rules every cycle. [`Baseline`] learns
-//! the "normal" shape of a machine's PATH across samples and classifies whether
-//! the current PATH is anomalous relative to that baseline. This drives an
-//! AUTO mode that can be tuned from conservative (only act on high-confidence
-//! deviations) to aggressive (enforce the learned baseline exactly).
+//! Learns normal PATH shape across samples and classifies anomalies.
 
 use std::collections::HashMap;
 
@@ -131,6 +125,7 @@ impl Baseline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn empty_baseline_is_not_anomalous() {
@@ -179,5 +174,70 @@ mod tests {
         b.record(r"C:\A;C:\B;C:\C");
         assert_eq!(b.samples(), 2);
         assert!((b.average_length() - 2.5).abs() < 1e-9);
+    }
+
+    proptest! {
+        #[test]
+        fn classify_never_panics(
+            ref samples in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+(;[a-zA-Z]:\\\\[a-zA-Z0-9_]+)*", 0..5),
+            ref current in "[a-zA-Z]:\\\\[a-zA-Z0-9_]+(;[a-zA-Z]:\\\\[a-zA-Z0-9_]+)*",
+            sensitivity in 0..1,
+        ) {
+            let s = if sensitivity == 0 { Sensitivity::Conservative } else { Sensitivity::Aggressive };
+            let mut b = Baseline::new(s);
+            for sample in samples {
+                b.record(sample);
+            }
+            let v = b.classify(current);
+            // anomaly is true iff there are unexpected_entries or missing_expected
+            prop_assert_eq!(v.anomaly, !v.unexpected_entries.is_empty() || !v.missing_expected.is_empty());
+        }
+
+        #[test]
+        fn recorded_entry_never_appears_as_unexpected(
+            ref recorded in "[a-zA-Z]:\\\\[a-zA-Z0-9_]+(;[a-zA-Z]:\\\\[a-zA-Z0-9_]+)*",
+            sensitivity in 0..1,
+        ) {
+            let s = if sensitivity == 0 { Sensitivity::Conservative } else { Sensitivity::Aggressive };
+            let mut b = Baseline::new(s);
+            b.record(recorded);
+            let v = b.classify(recorded);
+            // All entries from the recorded path appear in the baseline → none should be unexpected
+            for entry in recorded.split(';').filter(|e| !e.is_empty()) {
+                prop_assert!(
+                    !v.unexpected_entries.iter().any(|u| u.eq_ignore_ascii_case(entry)),
+                    "recorded entry '{}' appeared as unexpected in classify({})", entry, recorded
+                );
+            }
+        }
+
+        #[test]
+        fn average_length_is_sane(
+            ref samples in prop::collection::vec("[a-zA-Z]:\\\\[a-zA-Z0-9_]+(;[a-zA-Z]:\\\\[a-zA-Z0-9_]+)*", 0..10),
+        ) {
+            let mut b = Baseline::new(Sensitivity::Conservative);
+            for sample in samples {
+                b.record(sample);
+            }
+            let avg = b.average_length();
+            prop_assert!(avg.is_finite());
+            prop_assert!(avg >= 0.0);
+            if b.samples() > 0 {
+                prop_assert!(avg > 0.0, "with samples avg must be > 0");
+            }
+        }
+
+        #[test]
+        fn classify_never_leaks_unexpected_from_empty_baseline(
+            ref current in "[a-zA-Z]:\\\\[a-zA-Z0-9_]+(;[a-zA-Z]:\\\\[a-zA-Z0-9_]+)*",
+            sensitivity in 0..1,
+        ) {
+            let s = if sensitivity == 0 { Sensitivity::Conservative } else { Sensitivity::Aggressive };
+            let b = Baseline::new(s);
+            let v = b.classify(current);
+            prop_assert!(!v.anomaly, "empty baseline must never flag anomaly");
+            prop_assert!(v.unexpected_entries.is_empty());
+            prop_assert!(v.missing_expected.is_empty());
+        }
     }
 }
