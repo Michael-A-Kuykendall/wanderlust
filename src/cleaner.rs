@@ -16,28 +16,39 @@ use log::{error, info};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use windows_registry::CURRENT_USER;
 
-// The following are only used by production-only integration (history, logs,
-// backup lock) that is intentionally compiled out of `#[cfg(test)]` so unit
-// tests stay hermetic and fast.
+// `backup_lock` + `Duration` are only used by the production-only lock
+// acquisition in `apply_path`, which is compiled out of `#[cfg(test)]`.
 #[cfg(not(test))]
 use crate::backup_lock::BackupLock;
-#[cfg(not(test))]
-use crate::logging;
-#[cfg(not(test))]
-use crate::store;
-#[cfg(not(test))]
-use serde_json;
 #[cfg(not(test))]
 use std::time::Duration;
 
 /// Resolves the Wanderlust application data directory
 /// (`%LOCALAPPDATA%\wanderlust`), used for backups, history, and logs.
-#[cfg(not(test))]
 fn app_data_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|b| b.data_local_dir().join("wanderlust"))
+}
+
+/// Writes a heal-history entry and a structured log line after a successful
+/// heal. Called by `run_healing` (production only) and exercised directly by
+/// `integration_tests::persist_heal_outcome_writes_history_and_log`.
+pub(crate) fn persist_heal_outcome(dir: &Path, removed: usize, added: usize) {
+    use crate::logging;
+    use crate::store;
+    use serde_json;
+
+    let _ = store::HistoryStore::new(&store::default_history_path(dir)).append(
+        &store::HealingRecord::now(store::HealOutcome::Applied, removed, added, "scheduled"),
+    );
+    let _ = logging::append_event(
+        &logging::default_log_path(dir),
+        &logging::LogEvent::new(logging::Level::Info, "cleaner", "healed PATH").with_fields(
+            serde_json::json!({ "removed": removed, "added": added }),
+        ),
+    );
 }
 
 /// The main entry point for the healing logic.
@@ -278,25 +289,11 @@ pub fn run_healing(
 
     // Persist a cross-session record and emit a structured log line so later
     // runs (failure escalation, baselining, drift detection) can reason across
-    // heal cycles. Skipped under `#[cfg(test)]` to keep unit tests hermetic.
-    #[cfg(not(test))]
-    {
-        if let Some(dir) = app_data_dir() {
-            let _ = store::HistoryStore::new(&store::default_history_path(&dir)).append(
-                &store::HealingRecord::now(
-                    store::HealOutcome::Applied,
-                    removing.len(),
-                    adding.len(),
-                    "scheduled",
-                ),
-            );
-            let _ = logging::append_event(
-                &logging::default_log_path(&dir),
-                &logging::LogEvent::new(logging::Level::Info, "cleaner", "healed PATH").with_fields(
-                    serde_json::json!({ "removed": removing.len(), "added": adding.len() }),
-                ),
-            );
-        }
+    // heal cycles. The write itself is gated to production so unit tests stay
+    // hermetic and fast.
+    if let Some(_dir) = app_data_dir() {
+        #[cfg(not(test))]
+        persist_heal_outcome(&_dir, removing.len(), adding.len());
     }
 
     Ok(())
@@ -611,8 +608,29 @@ fn apply_path(system: &impl SystemOps, new_val: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::invariant_ppt::clear_invariant_log;
-    use crate::system::{MockCall, MockOperation, MockSystem};
+    use crate::system::{MockCall, MockOperation, MockSystem, TestTempDir};
     use proptest::prelude::*;
+
+    /// Exercises the production-only glue (`persist_heal_outcome`) at runtime so
+    /// the history + structured-logging write path is not just compile-checked.
+    #[test]
+    fn persist_heal_outcome_writes_history_and_log() {
+        let dir = TestTempDir::new("persist-glue").unwrap();
+        persist_heal_outcome(dir.path(), 2, 1);
+
+        let store = crate::store::HistoryStore::new(&crate::store::default_history_path(dir.path()));
+        let records = store.load().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].removed, 2);
+        assert_eq!(records[0].added, 1);
+        assert_eq!(records[0].outcome, crate::store::HealOutcome::Applied);
+
+        let log = crate::logging::default_log_path(dir.path());
+        assert!(log.exists());
+        let content = std::fs::read_to_string(&log).unwrap();
+        let event: crate::logging::LogEvent = serde_json::from_str(content.lines().next().unwrap()).unwrap();
+        assert_eq!(event.component, "cleaner");
+    }
 
     /// Behavior snapshot: the pure extraction accepts synthetic state and leaves all SystemOps
     /// boundaries untouched while preserving the pre-extraction path construction result.
