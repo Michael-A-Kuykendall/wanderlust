@@ -1,12 +1,8 @@
 # Wanderlust: The Self-Healing Windows PATH Manager 🧭✨
 
-[![Trans rights](https://pride-badges.pony.workers.dev/static/v1?label=trans%20rights&stripeWidth=6&stripeColors=5BCEFA,F5A9B8,FFFFFF,F5A9B8,5BCEFA)](https://translifeline.org/)
-[![LGBTQ+ friendly](https://pride-badges.pony.workers.dev/static/v1?label=lgbtq%2B%20friendly&stripeWidth=6&stripeColors=E40303,FF8C00,FFED00,008026,24408E,732982)](https://www.thetrevorproject.org/)
-
-
 ![Wanderlust Splash](https://raw.githubusercontent.com/Michael-A-Kuykendall/wanderlust/refs/heads/master/assets/wanderlust-splash.jpg)
 
-[![Crates.io](https://img.shields.io/crates/v/wanderlust.svg)](https://crates.io/crates/wanderlust)
+[![Crates.io](https://img.shields.io/crates/v/wanderlust.svg)](https://crates.io/crates/wanderlust) [![Trans rights](https://pride-badges.pony.workers.dev/static/v1?label=trans%20rights&stripeWidth=6&stripeColors=5BCEFA,F5A9B8,FFFFFF,F5A9B8,5BCEFA)](https://translifeline.org/) [![LGBTQ+ friendly](https://pride-badges.pony.workers.dev/static/v1?label=lgbtq%2B%20friendly&stripeWidth=6&stripeColors=E40303,FF8C00,FFED00,008026,24408E,732982)](https://www.thetrevorproject.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://rustup.rs/)
 [![Platform](https://img.shields.io/badge/platform-windows-blue.svg)](https://microsoft.com/windows)
@@ -157,7 +153,6 @@ MIT License.
 ---
 
 **Want to support Wanderlust?** [Become a sponsor](https://github.com/sponsors/Michael-A-Kuykendall) — every dollar keeps it free forever.
-
 
 ## Support
 
